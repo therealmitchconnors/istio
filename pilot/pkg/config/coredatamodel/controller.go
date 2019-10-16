@@ -21,7 +21,6 @@ import (
 	"sync"
 	"time"
 
-	"istio.io/istio/pilot/pkg/serviceregistry/kube"
 	"istio.io/pkg/ledger"
 
 	"github.com/gogo/protobuf/types"
@@ -202,7 +201,9 @@ func (c *Controller) Apply(change *sink.Change) error {
 		}
 	}
 	for _, removed := range change.Removed {
-		err := c.ledger.Delete(kube.KeyFunc(change.Collection, removed))
+		// According to docs, removed should be namespace/name
+		removedParts := strings.Split(removed, "/")
+		err := c.ledger.Delete(model.Key(descriptor.Type, removedParts[0], removedParts[1]))
 		if err != nil {
 			log.Warnf(ledgerLogf, err)
 		}
