@@ -291,8 +291,6 @@ func (r *Reporter) flushEvents(events []distributionEvent) {
 }
 
 func (r *Reporter) processEvent(conID string, distributionType v2.EventType, nonce string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.dirty = true
 	key := conID + string(distributionType) // TODO: delimit?
 	r.deleteKeyFromReverseMap(key)
