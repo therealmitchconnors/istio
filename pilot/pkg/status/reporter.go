@@ -267,12 +267,29 @@ func (r *Reporter) RegisterEvent(conID string, distributionType v2.EventType, no
 }
 
 func (r *Reporter) readFromEventQueue() {
-	for ev := range r.distributionEventQueue {
-		// TODO might need to batch this to prevent lock contention
+	size := 10
+	events := make([]distributionEvent, size)
+	for {
+		select {
+		case ev := <-r.distributionEventQueue:
+			events = append(events, ev)
+			r.flushEvents(events)
+			events = make([]distributionEvent, size)
+		default:
+			r.flushEvents(events)
+			events = make([]distributionEvent, size)
+		}
+	}
+}
+
+func (r *Reporter) flushEvents(events []distributionEvent) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, ev := range events {
 		r.processEvent(ev.conID, ev.distributionType, ev.nonce)
 	}
-
 }
+
 func (r *Reporter) processEvent(conID string, distributionType v2.EventType, nonce string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
