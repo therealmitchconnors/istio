@@ -256,7 +256,7 @@ func (r *Reporter) QueryLastNonce(conID string, distributionType v2.EventType) (
 // Register that a dataplane has acknowledged a new version of the config.
 // Theoretically, we could use the ads connections themselves to harvest this data,
 // but the mutex there is pretty hot, and it seems best to trade memory for time.
-func (r *Reporter) RegisterEvent(conID string, distributionType v2.EventType, nonce string) {
+func (r *Reporter) RegisterACK(conID string, distributionType v2.EventType, nonce string) {
 	d := distributionEvent{nonce: nonce, distributionType: distributionType, conID: conID}
 	select {
 	case r.distributionEventQueue <- d:

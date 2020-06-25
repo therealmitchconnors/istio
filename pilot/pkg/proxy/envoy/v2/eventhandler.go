@@ -50,11 +50,59 @@ func TypeURLToEventType(typeURL string) EventType {
 	}
 }
 
+func EventTypeToTypeV3URL(eventType EventType) string {
+	switch eventType{
+	case ClusterEventType:
+		return v3.ClusterType
+	case EndpointEventType:
+		return v3.EndpointType
+	case ListenerEventType:
+		return v3.ListenerType
+	case RouteEventType:
+		return v3.RouteType
+	default:
+		return "Unknown"
+	}
+}
+
 // EventHandler allows for generic monitoring of xDS ACKS and disconnects, for the purpose of tracking
 // Config distribution through the mesh.
 type DistributionStatusCache interface {
-	// RegisterEvent notifies the implementer of an xDS ACK, and must be non-blocking
-	RegisterEvent(conID string, eventType EventType, nonce string)
-	RegisterDisconnect(s string, types []EventType)
+	DistributionEventHandler
 	QueryLastNonce(conID string, eventType EventType) (noncePrefix string)
 }
+
+type DistributionEventHandler interface {
+	// RegisterACK notifies the implementer of an xDS ACK, and must be non-blocking
+	RegisterACK(conID string, eventType EventType, nonce string)
+	RegisterDisconnect(connID string, types []EventType)
+}
+
+func NewAggregateDistributionTracker(primary DistributionStatusCache, secondaries []DistributionEventHandler) DistributionStatusCache {
+	return &aggregateDistribitionTracker{primary, secondaries}
+}
+
+type aggregateDistribitionTracker struct {
+	primary DistributionStatusCache
+	secondaries []DistributionEventHandler
+}
+
+func (a aggregateDistribitionTracker) RegisterACK(conID string, eventType EventType, nonce string) {
+	a.primary.RegisterACK(conID, eventType, nonce)
+	for _, s := range a.secondaries {
+		s.RegisterACK(conID, eventType, nonce)
+	}
+}
+
+func (a aggregateDistribitionTracker) RegisterDisconnect(s string, types []EventType) {
+	a.primary.RegisterDisconnect(s, types)
+	for _, sec := range a.secondaries {
+		sec.RegisterDisconnect(s, types)
+	}
+}
+
+func (a aggregateDistribitionTracker) QueryLastNonce(conID string, eventType EventType) (noncePrefix string) {
+	return a.primary.QueryLastNonce(conID, eventType)
+}
+
+

@@ -470,9 +470,7 @@ func (s *DiscoveryServer) ConfigDump(w http.ResponseWriter, req *http.Request) {
 	_, _ = w.Write([]byte("You must provide a proxyID in the query string"))
 }
 
-// configDump converts the connection internal state into an Envoy Admin API config dump proto
-// It is used in debugging to create a consistent object for comparison between Envoy and Pilot outputs
-func (s *DiscoveryServer) configDump(conn *XdsConnection) (*adminapi.ConfigDump, error) {
+func (s *DiscoveryServer) dumpClusters(conn *XdsConnection) (*adminapi.ClustersConfigDump, error) {
 	dynamicActiveClusters := make([]*adminapi.ClustersConfigDump_DynamicCluster, 0)
 	clusters := s.ConfigGenerator.BuildClusters(conn.node, s.globalPushContext())
 
@@ -484,14 +482,14 @@ func (s *DiscoveryServer) configDump(conn *XdsConnection) (*adminapi.ConfigDump,
 		cluster.TypeUrl = conn.node.RequestedTypes.CDS
 		dynamicActiveClusters = append(dynamicActiveClusters, &adminapi.ClustersConfigDump_DynamicCluster{Cluster: cluster})
 	}
-	clustersAny, err := util.MessageToAnyWithError(&adminapi.ClustersConfigDump{
+	result := &adminapi.ClustersConfigDump{
 		VersionInfo:           versionInfo(),
 		DynamicActiveClusters: dynamicActiveClusters,
-	})
-	if err != nil {
-		return nil, err
 	}
+	return result, nil
+}
 
+func (s *DiscoveryServer) dumpListeners(conn *XdsConnection) (*adminapi.ListenersConfigDump, error) {
 	dynamicActiveListeners := make([]*adminapi.ListenersConfigDump_DynamicListener, 0)
 	listeners := s.ConfigGenerator.BuildListeners(conn.node, s.globalPushContext())
 	for _, cs := range listeners {
@@ -504,27 +502,50 @@ func (s *DiscoveryServer) configDump(conn *XdsConnection) (*adminapi.ConfigDump,
 			Name:        cs.Name,
 			ActiveState: &adminapi.ListenersConfigDump_DynamicListenerState{Listener: listener}})
 	}
-	listenersAny, err := util.MessageToAnyWithError(&adminapi.ListenersConfigDump{
+	result := &adminapi.ListenersConfigDump{
 		VersionInfo:      versionInfo(),
 		DynamicListeners: dynamicActiveListeners,
-	})
-	if err != nil {
-		return nil, err
 	}
+	return result, nil
+}
 
+func (s *DiscoveryServer) dumpRoutes(conn *XdsConnection) (result *adminapi.RoutesConfigDump, err error) {
 	routes := s.ConfigGenerator.BuildHTTPRoutes(conn.node, s.globalPushContext(), conn.Routes)
-	routeConfigAny := util.MessageToAny(&adminapi.RoutesConfigDump{})
+	dynamicRouteConfig := make([]*adminapi.RoutesConfigDump_DynamicRouteConfig, 0)
 	if len(routes) > 0 {
 		dynamicRouteConfig := make([]*adminapi.RoutesConfigDump_DynamicRouteConfig, 0)
 		for _, rs := range routes {
 			route, err := ptypes.MarshalAny(rs)
 			if err != nil {
-				return nil, err
+				return
 			}
 			route.TypeUrl = conn.node.RequestedTypes.RDS
 			dynamicRouteConfig = append(dynamicRouteConfig, &adminapi.RoutesConfigDump_DynamicRouteConfig{RouteConfig: route})
 		}
-		routeConfigAny, err = util.MessageToAnyWithError(&adminapi.RoutesConfigDump{DynamicRouteConfigs: dynamicRouteConfig})
+	}
+	result = &adminapi.RoutesConfigDump{DynamicRouteConfigs: dynamicRouteConfig}
+	return
+}
+
+// configDump converts the connection internal state into an Envoy Admin API config dump proto
+// It is used in debugging to create a consistent object for comparison between Envoy and Pilot outputs
+func (s *DiscoveryServer) configDump(conn *XdsConnection) (*adminapi.ConfigDump, error) {
+	clusterDump, err := s.dumpClusters(conn)
+	clustersAny, err := util.MessageToAnyWithError(clusterDump)
+	if err != nil {
+		return nil, err
+	}
+
+	listenerDump, err := s.dumpListeners(conn)
+	listenersAny, err := util.MessageToAnyWithError(listenerDump)
+	if err != nil {
+		return nil, err
+	}
+
+	routeDump, err := s.dumpRoutes(conn)
+	routeConfigAny := util.MessageToAny(&adminapi.RoutesConfigDump{})
+	if len(routeDump.DynamicRouteConfigs) > 0 {
+		routeConfigAny, err = util.MessageToAnyWithError(routeDump)
 		if err != nil {
 			return nil, err
 		}
