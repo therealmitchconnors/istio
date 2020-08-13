@@ -174,6 +174,7 @@ debug and diagnose their Istio mesh.
 		Aliases: []string{"x", "exp"},
 		Short:   "Experimental commands that may be modified or deprecated",
 	}
+	experimentalCmd.AddCommand(protocolLabelsCmd())
 
 	xdsBasedTroubleshooting := []*cobra.Command{
 		xdsVersionCommand(),
