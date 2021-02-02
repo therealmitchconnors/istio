@@ -336,8 +336,6 @@ func (r *Reporter) deleteKeyFromReverseMap(key string) {
 			delete(keys, key)
 			if len(r.reverseStatus[old]) < 1 {
 				delete(r.reverseStatus, old)
-				// inform the ledger that this version is no longer interesting.
-				_ = r.ledger.EraseRootHash(old)
 			}
 		}
 	}
