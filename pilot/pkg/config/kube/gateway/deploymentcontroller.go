@@ -30,6 +30,7 @@ import (
 	gateway "sigs.k8s.io/gateway-api/apis/v1beta1"
 	"sigs.k8s.io/yaml"
 
+	"istio.io/api/label"
 	meshapi "istio.io/api/mesh/v1alpha1"
 	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pkg/cluster"
@@ -82,6 +83,8 @@ type DeploymentController struct {
 	deployments     kclient.Client[*appsv1.Deployment]
 	services        kclient.Client[*corev1.Service]
 	serviceAccounts kclient.Client[*corev1.ServiceAccount]
+	namespaces      kclient.Client[*corev1.Namespace]
+	myTags          sets.Set[string]
 }
 
 // Patcher is a function that abstracts patching logic. This is largely because client-go fakes do not handle patching
@@ -225,6 +228,15 @@ func NewDeploymentController(client kube.Client, clusterID cluster.ID,
 	dc.serviceAccounts = kclient.New[*corev1.ServiceAccount](client)
 	dc.serviceAccounts.AddEventHandler(handler)
 
+	dc.namespaces = kclient.New[*corev1.Namespace](client)
+	dc.namespaces.AddEventHandler(controllers.ObjectHandler(func(o controllers.Object) {
+		// TODO: make this more intelligent, checking if something we care about has changed
+		// requeue this namespace
+		for _, gw := range dc.gateways.List(o.GetName(), klabels.Everything()) {
+			dc.queue.AddObject(gw)
+		}
+	}))
+
 	gateways.AddEventHandler(controllers.ObjectHandler(dc.queue.AddObject))
 	gatewayClasses.AddEventHandler(controllers.ObjectHandler(func(o controllers.Object) {
 		for _, g := range dc.gateways.List(metav1.NamespaceAll, klabels.Everything()) {
@@ -237,7 +249,9 @@ func NewDeploymentController(client kube.Client, clusterID cluster.ID,
 	// On injection template change, requeue all gateways
 	injectionHandler(func() {
 		for _, gw := range dc.gateways.List(metav1.NamespaceAll, klabels.Everything()) {
-			dc.queue.AddObject(gw)
+			if string(gw.Spec.GatewayClassName) == gw.GetName() {
+				dc.queue.AddObject(gw)
+			}
 		}
 	})
 
@@ -269,6 +283,15 @@ func (d *DeploymentController) Reconcile(req types.NamespacedName) error {
 	if gc != nil {
 		// We found the gateway class, but we do not implement it. Skip
 		if !knownControllers.Contains(string(gc.Spec.ControllerName)) {
+			return nil
+		}
+		// find the tag or revision indicated by the object
+		// TODO: handle default tag
+		selectedTag, ok := gw.Labels[label.IoIstioRev.Name]
+		if !ok {
+			selectedTag = d.namespaces.Get(gw.Namespace, "").Labels[label.IoIstioRev.Name]
+		}
+		if !d.myTags.Contains(selectedTag) {
 			return nil
 		}
 	} else {
@@ -410,6 +433,16 @@ func (d *DeploymentController) apply(controller string, yml string) error {
 		return fmt.Errorf("patch %v/%v/%v: %v", us.GroupVersionKind(), us.GetNamespace(), us.GetName(), err)
 	}
 	return nil
+}
+
+func (d *DeploymentController) HandleTagChange(newTags []string) {
+	d.myTags = sets.Set[string]{}
+	d.myTags.InsertAll(newTags...)
+	for _, gw := range d.gateways.List(metav1.NamespaceAll, klabels.Everything()) {
+		if string(gw.Spec.GatewayClassName) == gw.GetName() {
+			d.queue.AddObject(gw)
+		}
+	}
 }
 
 // ApplyObject renders an object with the given input and (server-side) applies the results to the cluster.
