@@ -249,9 +249,7 @@ func NewDeploymentController(client kube.Client, clusterID cluster.ID,
 	// On injection template change, requeue all gateways
 	injectionHandler(func() {
 		for _, gw := range dc.gateways.List(metav1.NamespaceAll, klabels.Everything()) {
-			if string(gw.Spec.GatewayClassName) == gw.GetName() {
-				dc.queue.AddObject(gw)
-			}
+			dc.queue.AddObject(gw)
 		}
 	})
 
@@ -289,7 +287,11 @@ func (d *DeploymentController) Reconcile(req types.NamespacedName) error {
 		// TODO: handle default tag
 		selectedTag, ok := gw.Labels[label.IoIstioRev.Name]
 		if !ok {
-			selectedTag = d.namespaces.Get(gw.Namespace, "").Labels[label.IoIstioRev.Name]
+			ns := d.namespaces.Get(gw.Namespace, "")
+			if ns == nil {
+				return nil
+			}
+			selectedTag = ns.Labels[label.IoIstioRev.Name]
 		}
 		if !d.myTags.Contains(selectedTag) {
 			return nil
@@ -436,8 +438,7 @@ func (d *DeploymentController) apply(controller string, yml string) error {
 }
 
 func (d *DeploymentController) HandleTagChange(newTags []string) {
-	d.myTags = sets.Set[string]{}
-	d.myTags.InsertAll(newTags...)
+	d.myTags = sets.New(newTags...)
 	for _, gw := range d.gateways.List(metav1.NamespaceAll, klabels.Everything()) {
 		if string(gw.Spec.GatewayClassName) == gw.GetName() {
 			d.queue.AddObject(gw)
