@@ -1,0 +1,15 @@
+{
+  "name": "ztunnel build-tools",
+  "dockerFile": "../docker/remote-env/Dockerfile",
+  "privileged": true,
+  // "remoteUser": "gitpod",
+  "runArgs": [ "-v","/var/run/docker.sock:/var/run/docker.sock" ],
+  // "onCreateCommand": "cargo build",
+"remoteEnv": {
+	"USE_GKE_GCLOUD_AUTH_PLUGIN": "True"
+},
+"features": {
+	"ghcr.io/devcontainers/features/docker-in-docker:2": {},
+	"ghcr.io/mpriscella/features/kind:1": {}
+}
+}
