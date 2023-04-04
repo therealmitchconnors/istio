@@ -1,15 +1,14 @@
 {
-  "name": "ztunnel build-tools",
-  "dockerFile": "../docker/remote-env/Dockerfile",
-  "privileged": true,
-  // "remoteUser": "gitpod",
-  "runArgs": [ "-v","/var/run/docker.sock:/var/run/docker.sock" ],
-  // "onCreateCommand": "cargo build",
-"remoteEnv": {
-	"USE_GKE_GCLOUD_AUTH_PLUGIN": "True"
-},
-"features": {
-	"ghcr.io/devcontainers/features/docker-in-docker:2": {},
-	"ghcr.io/mpriscella/features/kind:1": {}
-}
-}
+	"name": "istio build-tools",
+	"image": "ericvn/build-tools:master-latest-amd64",
+	
+	"privileged": true,
+	"remoteEnv": {
+	  "USE_GKE_GCLOUD_AUTH_PLUGIN": "True",
+	  "BUILD_WITH_CONTAINER":"0"
+	},
+	"features": {
+	  "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {},
+	  "ghcr.io/mpriscella/features/kind:1": {}
+	}
+  }
