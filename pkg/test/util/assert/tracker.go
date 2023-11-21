@@ -68,7 +68,7 @@ func (t *Tracker[T]) WaitOrdered(events ...T) {
 			// clear the event
 			t.events = t.events[1:]
 			return nil
-		}, retry.Timeout(time.Second))
+		}, retry.Timeout(time.Second), retry.BackoffDelay(time.Millisecond))
 	}
 	t.Empty()
 }
@@ -84,11 +84,11 @@ func (t *Tracker[T]) WaitUnordered(events ...T) {
 		t.mu.Lock()
 		defer t.mu.Unlock()
 		if len(t.events) == 0 {
-			return fmt.Errorf("no events")
+			return fmt.Errorf("no events (want %v)", want)
 		}
 		got := t.events[0]
 		if _, f := want[got]; !f {
-			t.t.Fatalf("got events %v, want %v", t.events, want)
+			return fmt.Errorf("got events %v, want %v", t.events, want)
 		}
 		// clear the event
 		t.events[0] = ptr.Empty[T]()
@@ -99,7 +99,7 @@ func (t *Tracker[T]) WaitUnordered(events ...T) {
 			return fmt.Errorf("still waiting for %v", want)
 		}
 		return nil
-	}, retry.Timeout(time.Second))
+	}, retry.Timeout(time.Second), retry.BackoffDelay(time.Millisecond))
 	t.Empty()
 }
 
@@ -114,12 +114,12 @@ func (t *Tracker[T]) WaitCompare(f func(T) bool) {
 		}
 		got := t.events[0]
 		if !f(got) {
-			t.t.Fatalf("got events %v, which does not match criteria", t.events)
+			return fmt.Errorf("got events %v, which does not match criteria", t.events)
 		}
 		// clear the event
 		t.events[0] = ptr.Empty[T]()
 		t.events = t.events[1:]
 		return nil
-	}, retry.Timeout(time.Second))
+	}, retry.Timeout(time.Second), retry.BackoffDelay(time.Millisecond))
 	t.Empty()
 }
