@@ -18,12 +18,15 @@ import (
 	"bytes"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/onsi/gomega"
 	"go.uber.org/atomic"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8sv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -43,6 +46,7 @@ import (
 	"istio.io/istio/pkg/config/schema/gvk"
 	"istio.io/istio/pkg/config/schema/gvr"
 	"istio.io/istio/pkg/kube"
+	"istio.io/istio/pkg/kube/controllers"
 	"istio.io/istio/pkg/kube/inject"
 	"istio.io/istio/pkg/kube/kclient"
 	"istio.io/istio/pkg/kube/kclient/clienttest"
@@ -231,7 +235,7 @@ func TestConfigureIstioGateway(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			buf := &bytes.Buffer{}
+			pc := patchChecker{data: map[patchKey][][]byte{}}
 			client := kube.NewFakeClient(tt.objects...)
 			kclient.NewWriteClient[*v1beta1.GatewayClass](client).Create(customClass)
 			kclient.NewWriteClient[*v1beta1.Gateway](client).Create(&tt.gw)
@@ -243,26 +247,18 @@ func TestConfigureIstioGateway(t *testing.T) {
 			d := NewDeploymentController(
 				client, cluster.ID(features.ClusterName), env, testInjectionConfig(t), func(fn func()) {
 				}, tw, "")
-			d.patcher = func(gvr schema.GroupVersionResource, name string, namespace string, data []byte, subresources ...string) error {
-				b, err := yaml.JSONToYAML(data)
-				if err != nil {
-					return err
-				}
-				buf.Write(b)
-				buf.WriteString("---\n")
-				return nil
-			}
+			d.patcher = pc.patcher
 			client.RunAndWait(stop)
 			go d.Run(stop)
-			kube.WaitForCacheSync("test", stop, d.queue.HasSynced)
+			kube.WaitForCacheSync("test", stop, d.HasSynced)
 
-			resp := timestampRegex.ReplaceAll(buf.Bytes(), []byte("lastTransitionTime: fake"))
-			util.CompareContent(t, resp, filepath.Join("testdata", "deployment", tt.name+".yaml"))
+			pc.CompareToGolden(t, filepath.Join("testdata", "deployment", tt.name+".yaml"))
 		})
 	}
 }
 
 func TestVersionManagement(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
 	log.SetOutputLevel(istiolog.DebugLevel)
 	writes := make(chan string, 10)
 	c := kube.NewFakeClient(&corev1.Namespace{
@@ -275,22 +271,25 @@ func TestVersionManagement(t *testing.T) {
 	d := NewDeploymentController(c, "", env, testInjectionConfig(t), func(fn func()) {}, tw, "")
 	reconciles := atomic.NewInt32(0)
 	wantReconcile := int32(0)
+	expectNotReconcield := func() {
+		t.Helper()
+		g.Consistently(reconciles.Load).Within(100 * time.Millisecond).Should(gomega.Equal(wantReconcile))
+	}
 	expectReconciled := func() {
 		t.Helper()
 		wantReconcile++
 		assert.EventuallyEqual(t, reconciles.Load, wantReconcile, retry.Timeout(time.Second*5), retry.Message("no reconciliation"))
+		expectNotReconcield()
 	}
 
 	d.patcher = func(g schema.GroupVersionResource, name string, namespace string, data []byte, subresources ...string) error {
-		if g == gvr.Service {
-			reconciles.Inc()
-		}
 		if g == gvr.KubernetesGateway {
 			b, err := yaml.JSONToYAML(data)
 			if err != nil {
 				return err
 			}
 			writes <- string(b)
+			reconciles.Inc()
 		}
 		return nil
 	}
@@ -299,7 +298,7 @@ func TestVersionManagement(t *testing.T) {
 	go tw.Run(stop)
 	go d.Run(stop)
 	c.RunAndWait(stop)
-	kube.WaitForCacheSync("test", stop, d.queue.HasSynced)
+	kube.WaitForCacheSync("test", stop, d.HasSynced)
 	// Create a gateway, we should mark our ownership
 	defaultGateway := &v1beta1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{
@@ -315,13 +314,11 @@ func TestVersionManagement(t *testing.T) {
 	// Test fake doesn't actual do Apply, so manually do this
 	defaultGateway.Annotations = map[string]string{ControllerVersionAnnotation: fmt.Sprint(ControllerVersion)}
 	gws.Update(defaultGateway)
-	expectReconciled()
 	// We shouldn't write in response to our write.
 	assert.ChannelIsEmpty(t, writes)
 
 	defaultGateway.Annotations["foo"] = "bar"
 	gws.Update(defaultGateway)
-	expectReconciled()
 	// We should not be updating the version, its already set. Setting it introduces a possible race condition
 	// since we use SSA so there is no conflict checks.
 	assert.ChannelIsEmpty(t, writes)
@@ -329,13 +326,13 @@ func TestVersionManagement(t *testing.T) {
 	// Somehow the annotation is removed - it should be added back
 	defaultGateway.Annotations = map[string]string{}
 	gws.Update(defaultGateway)
+	// TODO uncomment after drift detection enabled
 	expectReconciled()
 	assert.Equal(t, assert.ChannelHasItem(t, writes), buildPatch(ControllerVersion))
 	assert.ChannelIsEmpty(t, writes)
 	// Test fake doesn't actual do Apply, so manually do this
 	defaultGateway.Annotations = map[string]string{ControllerVersionAnnotation: fmt.Sprint(ControllerVersion)}
 	gws.Update(defaultGateway)
-	expectReconciled()
 	// We shouldn't write in response to our write.
 	assert.ChannelIsEmpty(t, writes)
 
@@ -348,7 +345,6 @@ func TestVersionManagement(t *testing.T) {
 	// Test fake doesn't actual do Apply, so manually do this
 	defaultGateway.Annotations = map[string]string{ControllerVersionAnnotation: fmt.Sprint(ControllerVersion)}
 	gws.Update(defaultGateway)
-	expectReconciled()
 	// We shouldn't write in response to our write.
 	assert.ChannelIsEmpty(t, writes)
 
@@ -357,7 +353,7 @@ func TestVersionManagement(t *testing.T) {
 	gws.Update(defaultGateway)
 	assert.ChannelIsEmpty(t, writes)
 	// Do not expect reconcile
-	assert.Equal(t, reconciles.Load(), wantReconcile)
+	expectNotReconcield()
 }
 
 func testInjectionConfig(t test.Failer) func() inject.WebhookConfig {
@@ -392,4 +388,101 @@ metadata:
   annotations:
     gateway.istio.io/controller-version: "%d"
 `, version)
+}
+
+type patchKey struct {
+	gvr       schema.GroupVersionResource
+	name      string
+	namespace string
+}
+
+type patchChecker struct {
+	data map[patchKey][][]byte
+}
+
+func (p *patchChecker) patcher(gvr schema.GroupVersionResource, name string, namespace string, data []byte, subresources ...string) error {
+	key := patchKey{gvr: gvr, name: name, namespace: namespace}
+	patches, ok := p.data[key]
+	if !ok {
+		patches = [][]byte{}
+	}
+	yamldata, err := yaml.JSONToYAML(data)
+	if err != nil {
+		return err
+	}
+	yamldata = timestampRegex.ReplaceAll(yamldata, []byte("lastTransitionTime: fake"))
+
+	// ensure patch contents match gvr, name, and namespace vars
+	datamap := map[string]any{}
+	err = yaml.Unmarshal(yamldata, &datamap)
+	if err != nil {
+		return fmt.Errorf("Unable to parse golden file as yaml: %s", err)
+	}
+	us := unstructured.Unstructured{Object: datamap}
+	ygvr, err := controllers.UnstructuredToGVR(us)
+	if err != nil {
+		return fmt.Errorf("Unable to parse golden file as unstructured: %s", err)
+	}
+	if ygvr != gvr {
+		return fmt.Errorf("GVR mismatch: %s != %s", ygvr, gvr)
+	}
+	if len(us.GetName()) > 0 && us.GetName() != name {
+		return fmt.Errorf("Name mismatch: %s != %s", us.GetName(), name)
+	}
+	if len(us.GetNamespace()) > 0 && us.GetNamespace() != namespace {
+		return fmt.Errorf("Namespace mismatch: %s != %s", us.GetNamespace(), namespace)
+	}
+	us.SetName(name)
+	us.SetNamespace(namespace)
+	j, err := yaml.Marshal(us.Object)
+	if err != nil {
+		return err
+	}
+
+	if len(patches) == 0 || string(patches[len(patches)-1]) != string(j) {
+		patches = append(patches, j)
+		p.data[key] = patches
+	}
+	return nil
+}
+
+func (p *patchChecker) dump() *bytes.Buffer {
+	result := &bytes.Buffer{}
+	for key, patches := range p.data {
+		for _, patch := range patches {
+			result.WriteString(fmt.Sprintf("%s/%s/%s\n", key.gvr, key.namespace, key.name))
+			result.Write(patch)
+			result.WriteString("---\n")
+		}
+	}
+	return result
+}
+
+func (p *patchChecker) CompareToGolden(t *testing.T, goldenFile string) {
+	inputContent := p.dump().Bytes()
+	g := gomega.NewGomegaWithT(t)
+	goldenBytes := util.ReadGoldenFile(t, inputContent, goldenFile)
+	for _, doc := range strings.Split(string(goldenBytes), "---\n") {
+		if len(strings.TrimSpace(doc)) == 0 {
+			continue
+		}
+		data := map[string]any{}
+		err := yaml.Unmarshal([]byte(doc), &data)
+		if err != nil {
+			t.Fatalf("Unable to parse golden file as yaml: %s", err)
+		}
+		us := unstructured.Unstructured{Object: data}
+		gvr, err := controllers.UnstructuredToGVR(us)
+
+		if err != nil {
+			t.Fatalf("Unable to parse golden file as unstructured: %s", err)
+		}
+		key := patchKey{gvr: gvr, name: us.GetName(), namespace: us.GetNamespace()}
+		g.Eventually(func() [][]byte { return p.data[key] }).Should(
+			gomega.And(
+				gomega.HaveLen(1),
+				gomega.ContainElement(gomega.MatchYAML(doc)),
+			),
+		)
+	}
 }

@@ -186,3 +186,9 @@ func (h *singleton[T]) List(namespace string) []T {
 	}
 	return []T{*v}
 }
+
+func WrapHandler[O any](triggerCallBack func(fn func()), lister TransformationEmpty[O], opts ...CollectionOption) Singleton[O] {
+	result := NewSingleton[O](lister, opts...)
+	triggerCallBack(result.(*singleton[O]).execute)
+	return result
+}
