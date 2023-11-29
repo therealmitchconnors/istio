@@ -22,6 +22,7 @@ import (
 	"istio.io/istio/pkg/kube"
 	"istio.io/istio/pkg/kube/controllers"
 	"istio.io/istio/pkg/kube/kclient"
+	"istio.io/istio/pkg/kube/krt"
 	"istio.io/istio/pkg/kube/kubetypes"
 	"istio.io/istio/pkg/util/sets"
 )
@@ -45,6 +46,22 @@ type tagWatcher struct {
 	queue    controllers.Queue
 	webhooks kclient.Client[*admissionregistrationv1.MutatingWebhookConfiguration]
 	index    *kclient.Index[string, *admissionregistrationv1.MutatingWebhookConfiguration]
+}
+
+func GetNewerTagWatcher(client kube.Client, revision string) krt.Collection[string] {
+	webhooks := kclient.NewFiltered[*admissionregistrationv1.MutatingWebhookConfiguration](client, kubetypes.Filter{
+		ObjectFilter: isTagWebhook,
+	})
+	kwh := krt.WrapClient(webhooks)
+	revkrt := krt.NewStatic(&revision)
+	return krt.JoinCollection([]krt.Collection[string]{revkrt.AsCollection(),
+		krt.NewCollection[*admissionregistrationv1.MutatingWebhookConfiguration, string](kwh, func(ctx krt.HandlerContext, wh *admissionregistrationv1.MutatingWebhookConfiguration) *string {
+			var result string
+			if wh.GetLabels()[label.IoIstioRev.Name] == revision {
+				result = wh.GetLabels()[IstioTagLabel]
+			}
+			return &result
+		})})
 }
 
 func NewTagWatcher(client kube.Client, revision string) TagWatcher {

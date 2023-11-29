@@ -15,12 +15,12 @@
 package gateway
 
 import (
-	"bytes"
 	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/onsi/gomega"
 	"go.uber.org/atomic"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -284,7 +284,7 @@ func TestConfigureIstioGateway(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			buf := &bytes.Buffer{}
+			pc := patchChecker{data: map[patchKey][][]byte{}}
 			client := kube.NewFakeClient(tt.objects...)
 			kclient.NewWriteClient[*v1beta1.GatewayClass](client).Create(customClass)
 			kclient.NewWriteClient[*v1beta1.Gateway](client).Create(&tt.gw)
@@ -307,7 +307,7 @@ func TestConfigureIstioGateway(t *testing.T) {
 			}
 			client.RunAndWait(stop)
 			go d.Run(stop)
-			kube.WaitForCacheSync("test", stop, d.queue.HasSynced)
+			kube.WaitForCacheSync("test", stop, d.HasSynced)
 
 			if tt.ignore {
 				assert.Equal(t, buf.String(), "")
@@ -320,6 +320,7 @@ func TestConfigureIstioGateway(t *testing.T) {
 }
 
 func TestVersionManagement(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
 	log.SetOutputLevel(istiolog.DebugLevel)
 	writes := make(chan string, 10)
 	c := kube.NewFakeClient(&corev1.Namespace{
@@ -332,22 +333,25 @@ func TestVersionManagement(t *testing.T) {
 	d := NewDeploymentController(c, "", env, testInjectionConfig(t, ""), func(fn func()) {}, tw, "", nil)
 	reconciles := atomic.NewInt32(0)
 	wantReconcile := int32(0)
+	expectNotReconcield := func() {
+		t.Helper()
+		g.Consistently(reconciles.Load).Within(100 * time.Millisecond).Should(gomega.Equal(wantReconcile))
+	}
 	expectReconciled := func() {
 		t.Helper()
 		wantReconcile++
 		assert.EventuallyEqual(t, reconciles.Load, wantReconcile, retry.Timeout(time.Second*5), retry.Message("no reconciliation"))
+		expectNotReconcield()
 	}
 
 	d.patcher = func(g schema.GroupVersionResource, name string, namespace string, data []byte, subresources ...string) error {
-		if g == gvr.Service {
-			reconciles.Inc()
-		}
 		if g == gvr.KubernetesGateway {
 			b, err := yaml.JSONToYAML(data)
 			if err != nil {
 				return err
 			}
 			writes <- string(b)
+			reconciles.Inc()
 		}
 		return nil
 	}
@@ -356,7 +360,7 @@ func TestVersionManagement(t *testing.T) {
 	go tw.Run(stop)
 	go d.Run(stop)
 	c.RunAndWait(stop)
-	kube.WaitForCacheSync("test", stop, d.queue.HasSynced)
+	kube.WaitForCacheSync("test", stop, d.HasSynced)
 	// Create a gateway, we should mark our ownership
 	defaultGateway := &v1beta1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{
@@ -372,13 +376,11 @@ func TestVersionManagement(t *testing.T) {
 	// Test fake doesn't actual do Apply, so manually do this
 	defaultGateway.Annotations = map[string]string{ControllerVersionAnnotation: fmt.Sprint(ControllerVersion)}
 	gws.Update(defaultGateway)
-	expectReconciled()
 	// We shouldn't write in response to our write.
 	assert.ChannelIsEmpty(t, writes)
 
 	defaultGateway.Annotations["foo"] = "bar"
 	gws.Update(defaultGateway)
-	expectReconciled()
 	// We should not be updating the version, its already set. Setting it introduces a possible race condition
 	// since we use SSA so there is no conflict checks.
 	assert.ChannelIsEmpty(t, writes)
@@ -386,13 +388,13 @@ func TestVersionManagement(t *testing.T) {
 	// Somehow the annotation is removed - it should be added back
 	defaultGateway.Annotations = map[string]string{}
 	gws.Update(defaultGateway)
+	// TODO uncomment after drift detection enabled
 	expectReconciled()
 	assert.Equal(t, assert.ChannelHasItem(t, writes), buildPatch(ControllerVersion))
 	assert.ChannelIsEmpty(t, writes)
 	// Test fake doesn't actual do Apply, so manually do this
 	defaultGateway.Annotations = map[string]string{ControllerVersionAnnotation: fmt.Sprint(ControllerVersion)}
 	gws.Update(defaultGateway)
-	expectReconciled()
 	// We shouldn't write in response to our write.
 	assert.ChannelIsEmpty(t, writes)
 
@@ -405,7 +407,6 @@ func TestVersionManagement(t *testing.T) {
 	// Test fake doesn't actual do Apply, so manually do this
 	defaultGateway.Annotations = map[string]string{ControllerVersionAnnotation: fmt.Sprint(ControllerVersion)}
 	gws.Update(defaultGateway)
-	expectReconciled()
 	// We shouldn't write in response to our write.
 	assert.ChannelIsEmpty(t, writes)
 
@@ -414,7 +415,7 @@ func TestVersionManagement(t *testing.T) {
 	gws.Update(defaultGateway)
 	assert.ChannelIsEmpty(t, writes)
 	// Do not expect reconcile
-	assert.Equal(t, reconciles.Load(), wantReconcile)
+	expectNotReconcield()
 }
 
 func testInjectionConfig(t test.Failer, values string) func() inject.WebhookConfig {

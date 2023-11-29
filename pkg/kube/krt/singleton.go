@@ -168,3 +168,9 @@ func NewSingleton[O any](hf TransformationEmpty[O], opts ...CollectionOption) Si
 	}, opts...)
 	return collectionAdapter[O]{col}
 }
+
+func WrapHandler[O any](triggerCallBack func(fn func()), lister TransformationEmpty[O], opts ...CollectionOption) Singleton[O] {
+	result := NewSingleton[O](lister, opts...)
+	triggerCallBack(result.(*singleton[O]).execute)
+	return result
+}
