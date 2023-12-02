@@ -56,6 +56,7 @@ func (t *Tracker[T]) Empty() {
 func (t *Tracker[T]) WaitOrdered(events ...T) {
 	t.t.Helper()
 	for _, event := range events {
+		var failure string // set to short circuit on fatal error
 		retry.UntilSuccessOrFail(t.t, func() error {
 			t.mu.Lock()
 			defer t.mu.Unlock()
@@ -63,12 +64,16 @@ func (t *Tracker[T]) WaitOrdered(events ...T) {
 				return fmt.Errorf("no events")
 			}
 			if t.events[0] != event {
-				t.t.Fatalf("got events %v, want %v", t.events, event)
+				failure = fmt.Sprintf("got events %v, want %v", t.events, event)
+				return nil
 			}
 			// clear the event
 			t.events = t.events[1:]
 			return nil
 		}, retry.Timeout(time.Second), retry.BackoffDelay(time.Millisecond))
+		if failure != "" {
+			t.t.Fatal(failure)
+		}
 	}
 	t.Empty()
 }
