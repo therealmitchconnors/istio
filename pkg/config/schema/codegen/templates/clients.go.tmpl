@@ -29,6 +29,19 @@ import (
 {{- end}}
 )
 
+func ExtractApplyConfig(obj runtime.Object, fieldManager string) (any, error) {
+	switch c := obj.(type) {
+{{- range .Entries }}
+	{{- if .ApplyConfigType }}
+	case *{{ .IstioAwareClientImport }}.{{ .Resource.Kind }}:
+		return {{ .ApplyConfigImport }}.Extract{{ .Resource.Kind }}(c, fieldManager)
+	{{- end }}
+{{- end }}
+	default:
+		panic(fmt.Sprintf("Unknown type %T", obj))
+	}
+}
+
 func GetWriteClient[T runtime.Object](c ClientGetter, namespace string) ktypes.WriteAPI[T] {
 	switch any(ptr.Empty[T]()).(type) {
 {{- range .Entries }}

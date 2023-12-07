@@ -20,10 +20,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 
 	"github.com/stoewer/go-strcase"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/applyconfigurations"
 
 	"istio.io/istio/pkg/config/schema/ast"
 	"istio.io/istio/pkg/test/env"
@@ -71,6 +74,9 @@ type colEntry struct {
 	// SpecType returns the type of the Spec field. Example: HTTPRouteSpec.
 	SpecType   string
 	StatusType string
+
+	ApplyConfigType   string
+	ApplyConfigImport string
 }
 
 type inputs struct {
@@ -92,6 +98,9 @@ func buildInputs() (inputs, error) {
 		return inputs{}, err
 	}
 	entries := make([]colEntry, 0, len(m.Resources))
+
+	// Single instance and sort names
+	names := sets.New[string]()
 	for _, r := range m.Resources {
 		spl := strings.Split(r.Proto, ".")
 		tname := spl[len(spl)-1]
@@ -110,15 +119,25 @@ func buildInputs() (inputs, error) {
 		if r.StatusProtoPackage != "" {
 			e.StatusType = statName
 		}
+		gvk := schema.GroupVersionKind{
+			Group:   r.Group,
+			Version: r.Version,
+			Kind:    r.Kind,
+		}
+		actype := getApplyConfig(gvk)
+		if actype != nil {
+			t := reflect.TypeOf(actype).Elem()
+			e.ApplyConfigType = t.Name()
+			names.Insert(t.PkgPath())
+			e.ApplyConfigImport = toImport(t.PkgPath())
+		}
+
 		entries = append(entries, e)
 	}
 
 	sort.Slice(entries, func(i, j int) bool {
 		return strings.Compare(entries[i].Resource.Identifier, entries[j].Resource.Identifier) < 0
 	})
-
-	// Single instance and sort names
-	names := sets.New[string]()
 
 	for _, r := range m.Resources {
 		if r.ProtoPackage != "" {
@@ -198,4 +217,13 @@ func toIstioAwareImport(p string) string {
 		return "api" + imp
 	}
 	return imp
+}
+
+func getApplyConfig(gvk schema.GroupVersionKind) any {
+	res := applyconfigurations.ForKind(gvk)
+	// TODO: istio client-go does not support extracting config
+	// if res == nil {
+	// 	res = applyconfiguration.ForKind(gvk)
+	// }
+	return res
 }

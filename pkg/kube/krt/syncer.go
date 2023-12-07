@@ -43,7 +43,10 @@ func ApplyToK8s[T any](g Collection[T], c kube.Client) {
 
 	NewSyncer[T, controllers.Object](g, ic,
 		func(t T, live controllers.Object) bool {
-			liveac := kubeclient.ExtractApplyConfig(live)
+			liveac, err := kubeclient.ExtractApplyConfig(live, "istio")
+			if err != nil {
+				log.Errorf("failed to extract applyconfig: %v", err)
+			}
 			return reflect.DeepEqual(liveac, t)
 		},
 		func(i T) {
@@ -56,7 +59,11 @@ func ApplyToK8s[T any](g Collection[T], c kube.Client) {
 			gvr := gvk.MustToGVR(igvk)
 			us := convertToUnstructured(i)
 			// TODO: Dynamic fake doesn't support apply upsert
-			_, err := c.Dynamic().Resource(gvr).Namespace(us.GetNamespace()).Apply(context.Background(), us.GetName(), &us, v1.ApplyOptions{})
+			_, err := c.Dynamic().Resource(gvr).Namespace(us.GetNamespace()).Apply(context.Background(), us.GetName(), &us, v1.ApplyOptions{
+				DryRun:       nil,
+				Force:        true,
+				FieldManager: "istio",
+			})
 			if err != nil {
 				panic(err)
 			}

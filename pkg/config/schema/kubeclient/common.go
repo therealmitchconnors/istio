@@ -187,8 +187,3 @@ func GetGVRFromApplyConfigType(t reflect.Type) schema.GroupVersionResource {
 	}
 	return myGVR
 }
-
-func ExtractApplyConfig(obj runtime.Object) any {
-	// TODO: Implement this with codegen
-	return nil
-}

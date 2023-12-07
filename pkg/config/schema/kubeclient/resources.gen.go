@@ -18,6 +18,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
+	k8sioclientgoapplyconfigurationsadmissionregistrationv1 "k8s.io/client-go/applyconfigurations/admissionregistration/v1"
+	k8sioclientgoapplyconfigurationsappsv1 "k8s.io/client-go/applyconfigurations/apps/v1"
+	k8sioclientgoapplyconfigurationscertificatesv1 "k8s.io/client-go/applyconfigurations/certificates/v1"
+	k8sioclientgoapplyconfigurationscoordinationv1 "k8s.io/client-go/applyconfigurations/coordination/v1"
+	k8sioclientgoapplyconfigurationscorev1 "k8s.io/client-go/applyconfigurations/core/v1"
+	k8sioclientgoapplyconfigurationsnetworkingv1 "k8s.io/client-go/applyconfigurations/networking/v1"
 	"k8s.io/client-go/tools/cache"
 	sigsk8siogatewayapiapisv1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	sigsk8siogatewayapiapisv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
@@ -32,6 +38,43 @@ import (
 	ktypes "istio.io/istio/pkg/kube/kubetypes"
 	"istio.io/istio/pkg/ptr"
 )
+
+func ExtractApplyConfig(obj runtime.Object, fieldManager string) (any, error) {
+	switch c := obj.(type) {
+	case *k8sioapicertificatesv1.CertificateSigningRequest:
+		return k8sioclientgoapplyconfigurationscertificatesv1.ExtractCertificateSigningRequest(c, fieldManager)
+	case *k8sioapicorev1.ConfigMap:
+		return k8sioclientgoapplyconfigurationscorev1.ExtractConfigMap(c, fieldManager)
+	case *k8sioapiappsv1.Deployment:
+		return k8sioclientgoapplyconfigurationsappsv1.ExtractDeployment(c, fieldManager)
+	case *k8sioapicorev1.Endpoints:
+		return k8sioclientgoapplyconfigurationscorev1.ExtractEndpoints(c, fieldManager)
+	case *k8sioapinetworkingv1.Ingress:
+		return k8sioclientgoapplyconfigurationsnetworkingv1.ExtractIngress(c, fieldManager)
+	case *k8sioapinetworkingv1.IngressClass:
+		return k8sioclientgoapplyconfigurationsnetworkingv1.ExtractIngressClass(c, fieldManager)
+	case *k8sioapicoordinationv1.Lease:
+		return k8sioclientgoapplyconfigurationscoordinationv1.ExtractLease(c, fieldManager)
+	case *k8sioapiadmissionregistrationv1.MutatingWebhookConfiguration:
+		return k8sioclientgoapplyconfigurationsadmissionregistrationv1.ExtractMutatingWebhookConfiguration(c, fieldManager)
+	case *k8sioapicorev1.Namespace:
+		return k8sioclientgoapplyconfigurationscorev1.ExtractNamespace(c, fieldManager)
+	case *k8sioapicorev1.Node:
+		return k8sioclientgoapplyconfigurationscorev1.ExtractNode(c, fieldManager)
+	case *k8sioapicorev1.Pod:
+		return k8sioclientgoapplyconfigurationscorev1.ExtractPod(c, fieldManager)
+	case *k8sioapicorev1.Secret:
+		return k8sioclientgoapplyconfigurationscorev1.ExtractSecret(c, fieldManager)
+	case *k8sioapicorev1.Service:
+		return k8sioclientgoapplyconfigurationscorev1.ExtractService(c, fieldManager)
+	case *k8sioapicorev1.ServiceAccount:
+		return k8sioclientgoapplyconfigurationscorev1.ExtractServiceAccount(c, fieldManager)
+	case *k8sioapiadmissionregistrationv1.ValidatingWebhookConfiguration:
+		return k8sioclientgoapplyconfigurationsadmissionregistrationv1.ExtractValidatingWebhookConfiguration(c, fieldManager)
+	default:
+		panic(fmt.Sprintf("Unknown type %T", obj))
+	}
+}
 
 func GetWriteClient[T runtime.Object](c ClientGetter, namespace string) ktypes.WriteAPI[T] {
 	switch any(ptr.Empty[T]()).(type) {
