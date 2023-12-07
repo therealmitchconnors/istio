@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -44,6 +45,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/runtime/serializer/yaml"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/managedfields"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	kubeVersion "k8s.io/apimachinery/pkg/version"
@@ -59,6 +61,7 @@ import (
 	"k8s.io/client-go/metadata"
 	metadatafake "k8s.io/client-go/metadata/fake"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/testing"
 	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
@@ -68,6 +71,7 @@ import (
 	gatewayapibeta "sigs.k8s.io/gateway-api/apis/v1beta1"
 	gatewayapiclient "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 	gatewayapifake "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned/fake"
+	"sigs.k8s.io/structured-merge-diff/v4/fieldpath"
 
 	"istio.io/api/annotation"
 	"istio.io/api/label"
@@ -79,7 +83,9 @@ import (
 	istioclient "istio.io/client-go/pkg/clientset/versioned"
 	istiofake "istio.io/client-go/pkg/clientset/versioned/fake"
 	"istio.io/istio/pkg/cluster"
+	"istio.io/istio/pkg/config/schema/collections"
 	"istio.io/istio/pkg/config/schema/gvk"
+	"istio.io/istio/pkg/config/schema/kubeclient"
 	"istio.io/istio/pkg/kube/informerfactory"
 	"istio.io/istio/pkg/kube/kubetypes"
 	"istio.io/istio/pkg/kube/mcs"
@@ -224,17 +230,31 @@ func NewFakeClient(objects ...runtime.Object) CLIClient {
 		informerWatchesPending: atomic.NewInt32(0),
 		clusterID:              "fake",
 	}
-	c.kube = fake.NewSimpleClientset(objects...)
+	f := fake.NewSimpleClientset(objects...)
+	c.kube = f
+	s := FakeIstioScheme
+	df := dynamicfake.NewSimpleDynamicClient(s)
+	tc := managedfields.NewDeducedTypeConverter()
+
+	for _, igvk := range collections.All.GroupVersionKinds() {
+		fm, err := managedfields.NewDefaultFieldManager(tc, s, s, s, igvk.Kubernetes(), igvk.Kubernetes().GroupVersion(), "", make(map[fieldpath.APIVersion]*fieldpath.Set))
+		if err != nil {
+			panic(err)
+		}
+
+		gvr := gvk.MustToGVR(igvk)
+		insertPatchReactor(f, gvr, fm)
+		insertPatchReactorUnst(df, gvr, fm)
+	}
 
 	c.config = &rest.Config{
 		Host: "server",
 	}
 
 	c.informerFactory = informerfactory.NewSharedInformerFactory()
-	s := FakeIstioScheme
 
 	c.metadata = metadatafake.NewSimpleMetadataClient(s)
-	c.dynamic = dynamicfake.NewSimpleDynamicClient(s)
+	c.dynamic = df
 	c.istio = istiofake.NewSimpleClientset()
 	c.gatewayapi = gatewayapifake.NewSimpleClientset()
 	c.extSet = extfake.NewSimpleClientset()
@@ -1206,4 +1226,94 @@ func findIstiodMonitoringPort(pod *v1.Pod) int {
 		}
 	}
 	return 15014
+}
+
+func insertPatchReactorUnst(f testing.FakeClient, gvr schema.GroupVersionResource, fm *managedfields.FieldManager) {
+	resource := gvr.GroupResource().Resource
+	f.PrependReactor(
+		"patch",
+		resource,
+		func(action clienttesting.Action) (handled bool, ret runtime.Object, err error) {
+			pa := action.(clienttesting.PatchAction)
+			if pa.GetPatchType() == types.ApplyPatchType {
+				// Apply patches are supposed to upsert, but fake client fails if the object doesn't exist,
+				// if an apply patch occurs for a deployment that doesn't yet exist, create it.
+				// However, we already hold the fakeclient lock, so we can't use the front door.
+				// rfunc := clienttesting.ObjectReaction(f.Tracker())
+				obj, err := f.Tracker().Get(pa.GetResource(), pa.GetNamespace(), pa.GetName())
+				obj = kubeclient.GVRToObject(pa.GetResource())
+				new := false
+				if kerrors.IsNotFound(err) || obj == nil {
+					new = true
+					obj = kubeclient.GVRToObject(pa.GetResource())
+					d := obj.(metav1.Object)
+					d.SetName(pa.GetName())
+					d.SetNamespace(pa.GetNamespace())
+				}
+				appliedObj := &unstructured.Unstructured{Object: map[string]interface{}{}}
+				if err := json.Unmarshal(pa.GetPatch(), &appliedObj.Object); err != nil {
+					log.Errorf("error decoding YAML: %v", err)
+				}
+				res, err := fm.Apply(obj, appliedObj, "istio", false)
+				if err != nil {
+					log.Errorf("error applying patch: %v", err)
+				}
+				ures := &unstructured.Unstructured{}
+				FakeIstioScheme.Convert(res, ures, nil)
+
+				if new {
+					f.Tracker().Create(pa.GetResource(), ures, pa.GetNamespace())
+				} else if !reflect.DeepEqual(obj, res) {
+					f.Tracker().Update(pa.GetResource(), ures, pa.GetNamespace())
+				}
+
+				return true, ures, nil
+			}
+			return false, nil, nil
+		},
+	)
+}
+
+func insertPatchReactor(f testing.FakeClient, gvr schema.GroupVersionResource, fm *managedfields.FieldManager) {
+	resource := gvr.GroupResource().Resource
+	f.PrependReactor(
+		"patch",
+		resource,
+		func(action clienttesting.Action) (handled bool, ret runtime.Object, err error) {
+			pa := action.(clienttesting.PatchAction)
+			if pa.GetPatchType() == types.ApplyPatchType {
+				// Apply patches are supposed to upsert, but fake client fails if the object doesn't exist,
+				// if an apply patch occurs for a deployment that doesn't yet exist, create it.
+				// However, we already hold the fakeclient lock, so we can't use the front door.
+				// rfunc := clienttesting.ObjectReaction(f.Tracker())
+				obj, err := f.Tracker().Get(pa.GetResource(), pa.GetNamespace(), pa.GetName())
+				obj = kubeclient.GVRToObject(pa.GetResource())
+				new := false
+				if kerrors.IsNotFound(err) || obj == nil {
+					new = true
+					obj = kubeclient.GVRToObject(pa.GetResource())
+					d := obj.(metav1.Object)
+					d.SetName(pa.GetName())
+					d.SetNamespace(pa.GetNamespace())
+				}
+				appliedObj := &unstructured.Unstructured{Object: map[string]interface{}{}}
+				if err := json.Unmarshal(pa.GetPatch(), &appliedObj.Object); err != nil {
+					log.Errorf("error decoding YAML: %v", err)
+				}
+				res, err := fm.Apply(obj, appliedObj, "istio", false)
+				if err != nil {
+					log.Errorf("error applying patch: %v", err)
+				}
+
+				if new {
+					f.Tracker().Create(pa.GetResource(), res, pa.GetNamespace())
+				} else if !reflect.DeepEqual(obj, res) {
+					f.Tracker().Update(pa.GetResource(), res, pa.GetNamespace())
+				}
+
+				return true, res, nil
+			}
+			return false, nil, nil
+		},
+	)
 }

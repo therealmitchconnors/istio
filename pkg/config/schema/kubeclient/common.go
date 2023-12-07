@@ -16,6 +16,7 @@ package kubeclient
 
 import (
 	"context"
+	"reflect"
 
 	kubeext "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,15 +24,19 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/applyconfigurations"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/tools/cache"
 	gatewayapiclient "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 
+	"istio.io/client-go/pkg/applyconfiguration"
 	istioclient "istio.io/client-go/pkg/clientset/versioned"
 	"istio.io/istio/pilot/pkg/util/informermetric"
+	"istio.io/istio/pkg/config/schema/collections"
 	"istio.io/istio/pkg/config/schema/kubetypes"
+	"istio.io/istio/pkg/config/schema/resource"
 	"istio.io/istio/pkg/kube/informerfactory"
 	ktypes "istio.io/istio/pkg/kube/kubetypes"
 	"istio.io/istio/pkg/log"
@@ -145,12 +150,45 @@ func setupInformer(opts ktypes.InformerOptions, inf cache.SharedIndexInformer) {
 // stripUnusedFields is the transform function for shared informers,
 // it removes unused fields from objects before they are stored in the cache to save memory.
 func stripUnusedFields(obj any) (any, error) {
-	t, ok := obj.(metav1.ObjectMetaAccessor)
-	if !ok {
-		// shouldn't happen
-		return obj, nil
-	}
-	// ManagedFields is large and we never use it
-	t.GetObjectMeta().SetManagedFields(nil)
+	// t, ok := obj.(metav1.ObjectMetaAccessor)
+	// if !ok {
+	// 	// shouldn't happen
+	// 	return obj, nil
+	// }
+	// // ManagedFields is large and we never use it
+	// t.GetObjectMeta().SetManagedFields(nil)
 	return obj, nil
+}
+
+// TODO: implement with codegen
+func GetGVRFromApplyConfigType(t reflect.Type) schema.GroupVersionResource {
+	myMap := map[reflect.Type]schema.GroupVersionResource{}
+
+	// this should be replaced by templating logic, but I couldn't figure out how to write that.
+	collections.Pilot.ForEach(func(s resource.Schema) bool {
+		ac := applyconfiguration.ForKind(s.GroupVersionKind().Kubernetes())
+		i := reflect.Indirect(reflect.ValueOf(ac)).Type()
+		myMap[i] = s.GroupVersionResource()
+		return false
+	})
+	collections.Kube.ForEach(func(s resource.Schema) bool {
+		ac := applyconfigurations.ForKind(s.GroupVersionKind().Kubernetes())
+		if ac != nil {
+			i := reflect.Indirect(reflect.ValueOf(ac)).Type()
+			myMap[i] = s.GroupVersionResource()
+		}
+		return false
+	})
+
+	// build L collection from informer
+	myGVR, ok := myMap[t]
+	if !ok {
+		panic("no GVR for type")
+	}
+	return myGVR
+}
+
+func ExtractApplyConfig(obj runtime.Object) any {
+	// TODO: Implement this with codegen
+	return nil
 }
