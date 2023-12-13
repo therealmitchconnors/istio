@@ -38,11 +38,16 @@ import (
 )
 
 func TestApplyToK8s(t *testing.T) {
+	cm := &corev1.ConfigMap{}
+	var meta metav1.Object
+	meta = cm
+	meta.SetAnnotations(nil)
 	g := gomega.NewWithT(t)
 	c := kube.NewFakeClient()
 
-	timeout := time.Hour
+	timeout := 2000 * time.Second
 	Secrets := krt.NewInformer[*corev1.Secret](c)
+	c.RunAndWait(test.NewStop(t))
 	GeneratedConfigMap := krt.NewCollection[*corev1.Secret, corev1ac.ConfigMapApplyConfiguration](Secrets, func(ctx krt.HandlerContext, i *corev1.Secret) *corev1ac.ConfigMapApplyConfiguration {
 		m := map[string]string{}
 		for k, v := range i.Data {
@@ -77,7 +82,8 @@ func TestApplyToK8s(t *testing.T) {
 	}
 	patchCount := func() int {
 		res := 0
-		for _, act := range c.Dynamic().(cgtesting.FakeClient).Actions() {
+		d := c.Dynamic().(cgtesting.FakeClient)
+		for _, act := range d.Actions() {
 			if act.Matches("patch", collections.ConfigMap.GroupVersionResource().Resource) && act.GetNamespace() == "default" {
 				res++
 			}
@@ -99,6 +105,20 @@ func TestApplyToK8s(t *testing.T) {
 	g.Eventually(patchCount).Should(gomega.Equal(2))
 	check("name", "default", map[string]any{"key": "value2"})
 	g.Consistently(patchCount).Should(gomega.Equal(2))
+
+	// log.Warn("attempt to drift")
+	// ucm := &unstructured.Unstructured{
+	// 	Object: map[string]interface{}{
+	// 		"data": map[string]interface{}{
+	// 			"key": "value",
+	// 		},
+	// 	},
+	// }
+	// c.Dynamic().Resource(collections.ConfigMap.GroupVersionResource()).
+	// 	Namespace("default").Update(context.Background(), ucm, metav1.UpdateOptions{})
+	// g.Eventually(patchCount).Should(gomega.Equal(3))
+	// check("name", "default", map[string]any{"key": "value2"})
+	// g.Consistently(patchCount).Should(gomega.Equal(3))
 	time.Sleep(time.Second)
 }
 
@@ -124,7 +144,6 @@ func TestSynchronizer(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-
 			result := reflect.DeepEqual(gen, *liveac)
 			return result
 		},
@@ -191,3 +210,32 @@ func TestSynchronizer(t *testing.T) {
 func getType[T any]() reflect.Type {
 	return reflect.TypeOf(ptr.Empty[T]())
 }
+
+// func TestSanity(t *testing.T) {
+// 	g := gomega.NewGomegaWithT(t)
+// 	c := kube.NewFakeClient()
+// 	// g := gomega.NewWithT(t)
+// 	cm := &corev1.ConfigMap{
+// 		ObjectMeta: metav1.ObjectMeta{Name: "name"},
+// 		Data: map[string]string{
+// 			"key": string("value"),
+// 		},
+// 	}
+
+// 	i := kclient.NewUntypedInformer(c, gvr.ConfigMap, kubetypes.Filter{})
+// 	// ic := krt.WrapClient[controllers.Object](i)
+// 	z := atomic.Int32{}
+// 	i.AddEventHandler(krt.EventHandler[*unstructured.Unstructured](func(o krt.Event[*unstructured.Unstructured]) {
+// 		z.Add(1)
+// 	}))
+
+// 	ucm := krt.ConvertToUnstructured(cm)
+
+// 	out, err := c.Dynamic().Resource(gvr.ConfigMap).Namespace("default").Create(context.Background(), &ucm, metav1.CreateOptions{})
+// 	if err != nil {
+// 		t.Fatal(err)
+// 	}
+// 	t.Log(out)
+
+// 	g.Eventually(z.Load).Should(gomega.Equal(1))
+// }

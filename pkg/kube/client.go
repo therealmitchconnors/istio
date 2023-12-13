@@ -527,7 +527,9 @@ func (c *client) WaitForCacheSync(name string, stop <-chan struct{}, cacheSyncs 
 		return WaitForCacheSync(name, stop, cacheSyncs...)
 	}
 	syncFns := append(cacheSyncs, func() bool {
-		return c.informerWatchesPending.Load() == 0
+		x := c.informerWatchesPending.Load()
+		log.Errorf("there are %v watches pending", x)
+		return x == 0
 	})
 	return WaitForCacheSync(name, stop, syncFns...)
 }

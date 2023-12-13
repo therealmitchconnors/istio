@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"sync"
 
+	"istio.io/client-go/pkg/applyconfiguration"
 	"istio.io/istio/pkg/config/schema/gvk"
 	"istio.io/istio/pkg/config/schema/kubeclient"
 	"istio.io/istio/pkg/config/schema/resource"
@@ -31,7 +32,11 @@ import (
 	"istio.io/istio/pkg/ptr"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8schema "k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/managedfields"
+	"k8s.io/client-go/applyconfigurations"
+	"sigs.k8s.io/structured-merge-diff/v4/typed"
 )
 
 func ApplyToK8s[T any](g Collection[T], c kube.Client) {
@@ -43,7 +48,7 @@ func ApplyToK8s[T any](g Collection[T], c kube.Client) {
 
 	NewSyncer[T, controllers.Object](g, ic,
 		func(t T, live controllers.Object) bool {
-			liveac, err := kubeclient.ExtractApplyConfig(live, "istio")
+			liveac, err := Extract[T](live, "istio")
 			if err != nil {
 				log.Errorf("failed to extract applyconfig: %v", err)
 			}
@@ -57,7 +62,7 @@ func ApplyToK8s[T any](g Collection[T], c kube.Client) {
 			kind := gv.WithKind(kindString)
 			igvk := resource.FromKubernetesGVK(&kind)
 			gvr := gvk.MustToGVR(igvk)
-			us := convertToUnstructured(i)
+			us := ConvertToUnstructured(i)
 			// TODO: Dynamic fake doesn't support apply upsert
 			_, err := c.Dynamic().Resource(gvr).Namespace(us.GetNamespace()).Apply(context.Background(), us.GetName(), &us, v1.ApplyOptions{
 				DryRun:       nil,
@@ -71,7 +76,7 @@ func ApplyToK8s[T any](g Collection[T], c kube.Client) {
 	)
 }
 
-func convertToUnstructured(i any) unstructured.Unstructured {
+func ConvertToUnstructured(i any) unstructured.Unstructured {
 	jbytes, err := json.Marshal(i)
 	if err != nil {
 		panic(err)
@@ -114,4 +119,34 @@ func NewSyncer[G, L any](
 		}
 		return nil
 	})
+}
+
+func Extract[T any](live controllers.Object, fieldManager string) (*T, error) {
+	ac := ForKind(live.GetObjectKind().GroupVersionKind())
+	err := managedfields.ExtractInto(live, typed.DeducedParseableType, fieldManager, ac, "")
+	if err != nil {
+		return nil, err
+	}
+	eac := ac.(Extractable[T])
+	eac.WithName(live.GetName())
+	eac.WithNamespace(live.GetNamespace())
+
+	eac.WithKind("ConfigMap")
+	return eac.WithAPIVersion("v1"), nil
+}
+
+func ForKind(kind schema.GroupVersionKind) interface{} {
+	out := applyconfigurations.ForKind(kind)
+	if out == nil {
+		out = applyconfiguration.ForKind(kind)
+	}
+	return out
+}
+
+type Extractable[T any] interface {
+	WithName(string) *T
+	WithNamespace(string) *T
+
+	WithKind(string) *T
+	WithAPIVersion(string) *T
 }

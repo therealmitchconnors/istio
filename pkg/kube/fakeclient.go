@@ -100,6 +100,7 @@ func NewFakeClient(objects ...runtime.Object) CLIClient {
 	// at created Informers
 	// an atomic.Int is used instead of sync.WaitGroup because wg.Add and wg.Wait cannot be called concurrently
 	listReactor := func(action clienttesting.Action) (handled bool, ret runtime.Object, err error) {
+		log.Errorf("incrementing due to %v", action)
 		c.informerWatchesPending.Inc()
 		return false, nil, nil
 	}
@@ -111,6 +112,7 @@ func NewFakeClient(objects ...runtime.Object) CLIClient {
 			if err != nil {
 				return false, nil, err
 			}
+			log.Errorf("decrementing due to %v", action)
 			c.informerWatchesPending.Dec()
 			return true, watch, nil
 		}
@@ -136,10 +138,14 @@ func NewFakeClient(objects ...runtime.Object) CLIClient {
 		c.dynamic.(*dynamicfake.FakeDynamicClient),
 		c.metadata.(*metadatafake.FakeMetadataClient),
 	} {
-		fc.PrependReactor("list", "*", listReactor)
+		// fc.PrependReactor("list", "*", listReactor)
 		fc.PrependWatchReactor("*", watchReactor(fc.Tracker()))
-		fc.PrependReactor("create", "*", createReactor)
+		// fc.PrependReactor("create", "*", createReactor)
 	}
+	f.PrependReactor("list", "*", listReactor)
+	f.PrependReactor("create", "*", createReactor)
+	c.metadata.(*metadatafake.FakeMetadataClient).PrependReactor("list", "*", listReactor)
+	c.metadata.(*metadatafake.FakeMetadataClient).PrependReactor("create", "*", createReactor)
 
 	c.fastSync = true
 
@@ -199,13 +205,21 @@ func insertPatchReactor(f testing.FakeClient, fmf *fieldManagerFactory) {
 					return false, res, err
 				}
 
-				if new {
-					err = f.Tracker().Create(pa.GetResource(), res, pa.GetNamespace())
-				} else if !reflect.DeepEqual(obj, res) {
-					err = f.Tracker().Update(pa.GetResource(), res, pa.GetNamespace())
+				// field manager outputs typed objects.  We might need unustructured here.
+				if _, ok := f.(*dynamicfake.FakeDynamicClient); ok {
+					obj = &unstructured.Unstructured{}
+					fmf.schema.Convert(res, obj, nil)
+				} else {
+					obj = res
 				}
 
-				return true, res, err
+				if new {
+					err = f.Tracker().Create(pa.GetResource(), obj, pa.GetNamespace())
+				} else if !reflect.DeepEqual(obj, res) {
+					err = f.Tracker().Update(pa.GetResource(), obj, pa.GetNamespace())
+				}
+
+				return true, obj, err
 			}
 			return false, nil, nil
 		},
@@ -265,36 +279,37 @@ func (fm *fakeMerger) propagateReactionSingle(destination testing.FakeClient, ac
 	// otherwise the obj var is ignored, and is traditionally defaulted to metav1.status
 	var defaultObj runtime.Object
 	defaultObj = &metav1.Status{Status: "metadata get fail"}
+	var tObj, uObj runtime.Object
 	if o, ok := action.(objectiveAction); ok {
-		defaultObj = o.GetObject()
-	}
-	var typedDefault runtime.Object
-	if _, ok := destination.(*dynamicfake.FakeDynamicClient); ok {
-		typedDefault = &unstructured.Unstructured{}
-	} else {
-		typedDefault = kubeclient.GVRToObject(action.GetResource())
-	}
-	// convert the object to the required type
-	err = fm.scheme.Convert(defaultObj, typedDefault, nil)
-	if err != nil {
-		log.Errorf("Cannot convert %v to the desired type for %v: %v", defaultObj, destination, err)
-		return false, nil, nil
+		uObj = o.GetObject()
+		// }
+		if _, ok := destination.(*dynamicfake.FakeDynamicClient); ok {
+			tObj = &unstructured.Unstructured{}
+		} else {
+			tObj = kubeclient.GVRToObject(action.GetResource())
+		}
+		// convert the object to the required type
+		err = fm.scheme.Convert(uObj, tObj, nil)
+		if err != nil {
+			log.Errorf("Cannot convert %v to the desired type for %v: %v", defaultObj, destination, err)
+			return false, nil, nil
+		}
 	}
 	switch newAction := action.DeepCopy().(type) {
 	case clienttesting.CreateActionImpl:
-		newAction.Object = typedDefault
-		_, err := destination.Invokes(newAction, typedDefault)
+		newAction.Object = tObj
+		_, err := destination.Invokes(newAction, defaultObj)
 		if err != nil {
 			log.Errorf("Propagating Invoke resulted in error for fake %v: %v", destination, err)
 		}
 	case clienttesting.UpdateActionImpl:
-		newAction.Object = typedDefault
-		_, err := destination.Invokes(newAction, typedDefault)
+		newAction.Object = tObj
+		_, err := destination.Invokes(newAction, defaultObj)
 		if err != nil {
 			log.Errorf("Propagating Invoke resulted in error for fake %v: %v", destination, err)
 		}
 	default:
-		_, err := destination.Invokes(newAction, typedDefault)
+		_, err := destination.Invokes(newAction, defaultObj)
 		if err != nil {
 			log.Errorf("Propagating Invoke resulted in error for fake %v: %v", destination, err)
 		}
