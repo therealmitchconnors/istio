@@ -100,7 +100,6 @@ func NewFakeClient(objects ...runtime.Object) CLIClient {
 	// at created Informers
 	// an atomic.Int is used instead of sync.WaitGroup because wg.Add and wg.Wait cannot be called concurrently
 	listReactor := func(action clienttesting.Action) (handled bool, ret runtime.Object, err error) {
-		log.Errorf("incrementing due to %v", action)
 		c.informerWatchesPending.Inc()
 		return false, nil, nil
 	}
@@ -112,7 +111,6 @@ func NewFakeClient(objects ...runtime.Object) CLIClient {
 			if err != nil {
 				return false, nil, err
 			}
-			log.Errorf("decrementing due to %v", action)
 			c.informerWatchesPending.Dec()
 			return true, watch, nil
 		}
@@ -181,45 +179,51 @@ func insertPatchReactor(f testing.FakeClient, fmf *fieldManagerFactory) {
 				// if an apply patch occurs for a deployment that doesn't yet exist, create it.
 				// However, we already hold the fakeclient lock, so we can't use the front door.
 				// rfunc := clienttesting.ObjectReaction(f.Tracker())
-				obj, err := f.Tracker().Get(pa.GetResource(), pa.GetNamespace(), pa.GetName())
+				original, err := f.Tracker().Get(pa.GetResource(), pa.GetNamespace(), pa.GetName())
 				new := false
 				mygvk := gvk.MustFromGVR(pa.GetResource()).Kubernetes()
-				if kerrors.IsNotFound(err) || obj == nil {
+				if kerrors.IsNotFound(err) || original == nil {
 					new = true
-					obj = kubeclient.GVRToObject(pa.GetResource())
-					d := obj.(metav1.Object)
+					original = kubeclient.GVRToObject(pa.GetResource())
+					d := original.(metav1.Object)
 					d.SetName(pa.GetName())
 					d.SetNamespace(pa.GetNamespace())
-					e := obj.(schema.ObjectKind)
+					e := original.(schema.ObjectKind)
 					e.SetGroupVersionKind(mygvk)
 				}
 
-				appliedObj := &unstructured.Unstructured{Object: map[string]interface{}{}}
-				if err := json.Unmarshal(pa.GetPatch(), &appliedObj.Object); err != nil {
+				applyObj := &unstructured.Unstructured{Object: map[string]interface{}{}}
+				if err := json.Unmarshal(pa.GetPatch(), &applyObj.Object); err != nil {
 					log.Errorf("error decoding YAML: %v", err)
 					return false, nil, err
 				}
-				res, err := fmf.FieldManager(mygvk).Apply(obj, appliedObj, "istio", false)
+				// TODO: I'm not 100% sure this should always force, but we lose the apply option...
+				res, err := fmf.FieldManager(mygvk).Apply(original, applyObj, "istio", true)
 				if err != nil {
 					log.Errorf("error applying patch: %v", err)
 					return false, res, err
 				}
 
 				// field manager outputs typed objects.  We might need unustructured here.
+				var typedResult runtime.Object
 				if _, ok := f.(*dynamicfake.FakeDynamicClient); ok {
-					obj = &unstructured.Unstructured{}
-					fmf.schema.Convert(res, obj, nil)
+					typedResult = &unstructured.Unstructured{}
+					err = fmf.schema.Convert(res, typedResult, nil)
+					if err != nil {
+						log.Errorf("error converting object (%v), fakeclients may become inconsistent: %v", res, err)
+						return false, nil, err
+					}
 				} else {
-					obj = res
+					typedResult = res
 				}
 
 				if new {
-					err = f.Tracker().Create(pa.GetResource(), obj, pa.GetNamespace())
-				} else if !reflect.DeepEqual(obj, res) {
-					err = f.Tracker().Update(pa.GetResource(), obj, pa.GetNamespace())
+					err = f.Tracker().Create(pa.GetResource(), typedResult, pa.GetNamespace())
+				} else if !reflect.DeepEqual(original, typedResult) {
+					err = f.Tracker().Update(pa.GetResource(), typedResult, pa.GetNamespace())
 				}
 
-				return true, obj, err
+				return true, typedResult, err
 			}
 			return false, nil, nil
 		},
@@ -294,6 +298,8 @@ func (fm *fakeMerger) propagateReactionSingle(destination testing.FakeClient, ac
 			log.Errorf("Cannot convert %v to the desired type for %v: %v", defaultObj, destination, err)
 			return false, nil, nil
 		}
+		// Convert from unstructured to typed sometimes drops the gvk, re-add it here.
+		tObj.GetObjectKind().SetGroupVersionKind(uObj.GetObjectKind().GroupVersionKind())
 	}
 	switch newAction := action.DeepCopy().(type) {
 	case clienttesting.CreateActionImpl:

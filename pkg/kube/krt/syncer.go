@@ -46,37 +46,38 @@ func ApplyToK8s[T any](g Collection[T], c kube.Client) {
 	i := kclient.NewUntypedInformer(c, myGVR, kubetypes.Filter{})
 	ic := WrapClient[controllers.Object](i)
 
+	log := log.WithLabels("type", fmt.Sprintf("apply[%T]", *new(T)))
+
 	NewSyncer[T, controllers.Object](g, ic,
 		func(t T, live controllers.Object) bool {
 			liveac, err := Extract[T](live, "istio")
 			if err != nil {
 				log.Errorf("failed to extract applyconfig: %v", err)
 			}
-			return reflect.DeepEqual(liveac, t)
+			return reflect.DeepEqual(*liveac, t)
 		},
 		func(i T) {
 			apiVersion, kindString := getVersionKind(i)
-			// apiVersion := getField(i, "APIVersion")
 			gv, _ := k8schema.ParseGroupVersion(apiVersion)
-			// kindString := getField(i, "Kind")
 			kind := gv.WithKind(kindString)
 			igvk := resource.FromKubernetesGVK(&kind)
 			gvr := gvk.MustToGVR(igvk)
-			us := ConvertToUnstructured(i)
-			// TODO: Dynamic fake doesn't support apply upsert
+			us := convertToUnstructured(i)
 			_, err := c.Dynamic().Resource(gvr).Namespace(us.GetNamespace()).Apply(context.Background(), us.GetName(), &us, v1.ApplyOptions{
 				DryRun:       nil,
 				Force:        true,
 				FieldManager: "istio",
 			})
 			if err != nil {
-				panic(err)
+				// TODO: how do we provide feedback to the caller on this error?
+				log.Errorf("failed to apply %v: %v", i, err)
 			}
 		},
 	)
 }
 
-func ConvertToUnstructured(i any) unstructured.Unstructured {
+// convertToUnstructured could be replaced by runtime.Scheme.Convert(), but we don't have a scheme here
+func convertToUnstructured(i any) unstructured.Unstructured {
 	jbytes, err := json.Marshal(i)
 	if err != nil {
 		panic(err)
@@ -90,6 +91,7 @@ func ConvertToUnstructured(i any) unstructured.Unstructured {
 }
 
 func getVersionKind(v interface{}) (string, string) {
+	// TODO: there's got to be a better way to do this, but applyconfigs expose no get methods.
 	r := reflect.Indirect(reflect.ValueOf(v)).FieldByName("TypeMetaApplyConfiguration")
 	apiVersion := r.FieldByName("APIVersion").Elem()
 	kind := r.FieldByName("Kind").Elem()
@@ -104,6 +106,7 @@ func NewSyncer[G, L any](
 ) {
 	mu := sync.Mutex{}
 	log := log.WithLabels("type", fmt.Sprintf("sync[%T]", *new(G)))
+
 	NewCollection[G, bool](g, func(ctx HandlerContext, gen G) *bool {
 		genKey := GetKey(gen)
 		live := FetchOne(ctx, l, FilterKey(string(genKey)))
@@ -113,7 +116,7 @@ func NewSyncer[G, L any](
 		if live != nil {
 			changed = !compare(gen, *live)
 		}
-		log.WithLabels("changed", changed).Infof("live update")
+		log.WithLabels("changed", changed).Infof("live update: %v, %v", gen, live)
 		if changed {
 			apply(gen)
 		}
@@ -131,11 +134,14 @@ func Extract[T any](live controllers.Object, fieldManager string) (*T, error) {
 	eac.WithName(live.GetName())
 	eac.WithNamespace(live.GetNamespace())
 
-	eac.WithKind("ConfigMap")
-	return eac.WithAPIVersion("v1"), nil
+	gvk := live.GetObjectKind().GroupVersionKind()
+	eac.WithKind(gvk.Kind)
+	return eac.WithAPIVersion(gvk.Version), nil
 }
 
 func ForKind(kind schema.GroupVersionKind) interface{} {
+	// TODO: this should be expanded for every client-go we use that exposes applyconfigs.
+	// Right now, gateway api does not expose applyconfigs, so it's just k8s and istio.
 	out := applyconfigurations.ForKind(kind)
 	if out == nil {
 		out = applyconfiguration.ForKind(kind)
