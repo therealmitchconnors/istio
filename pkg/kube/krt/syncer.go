@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"sync"
 
 	"istio.io/client-go/pkg/applyconfiguration"
 	"istio.io/istio/pkg/config/schema/gvk"
@@ -105,23 +104,44 @@ func NewSyncer[G, L any](
 	compare func(G, L) bool,
 	apply func(G),
 ) {
-	mu := sync.Mutex{}
 	log := log.WithLabels("type", fmt.Sprintf("sync[%T]", *new(G)))
-
-	NewCollection[G, bool](g, func(ctx HandlerContext, gen G) *bool {
-		genKey := GetKey(gen)
-		live := FetchOne(ctx, l, FilterKey(string(genKey)))
-		mu.Lock()
-		defer mu.Unlock()
-		changed := true
-		if live != nil {
-			changed = !compare(gen, *live)
+	g.Register(func(o Event[G]) {
+		// TODO: we need not just Apply but also delete
+		switch o.Event {
+		case controllers.EventDelete:
+		default:
+			gen := o.Latest()
+			genKey := GetKey(gen)
+			// TODO: can we make this Key conversion in a safer manner
+			live := l.GetKey(Key[L](genKey))
+			changed := true
+			if live != nil {
+				changed = !compare(gen, *live)
+			}
+			log.WithLabels("changed", changed).Infof("generated update")
+			if changed {
+				apply(gen)
+			}
 		}
-		log.WithLabels("changed", changed).Infof("live update: %v, %v", gen, live)
-		if changed {
-			apply(gen)
+	})
+	l.Register(func(o Event[L]) {
+		// TODO: we need not just Apply but also delete
+		switch o.Event {
+		case controllers.EventDelete:
+		default:
+			live := o.Latest()
+			liveKey := GetKey(live)
+			// TODO: can we make this Key conversion in a safer manner
+			gen := g.GetKey(Key[G](liveKey))
+			if gen == nil {
+				return
+			}
+			changed := !compare(*gen, live)
+			log.WithLabels("changed", changed).Infof("live update")
+			if changed {
+				apply(*gen)
+			}
 		}
-		return nil
 	})
 }
 
