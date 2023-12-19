@@ -38,7 +38,6 @@ import (
 	"istio.io/istio/pkg/config/schema/collections"
 	"istio.io/istio/pkg/config/schema/gvr"
 	"istio.io/istio/pkg/log"
-	"istio.io/istio/pkg/revisions"
 )
 
 // URL schemes supported by the config store
@@ -176,17 +175,15 @@ func (s *Server) initK8SConfigStore(args *PilotArgs) error {
 							if !features.EnableEnhancedResourceScoping {
 								nsFilter = nil
 							}
-							tagWatcher := revisions.NewTagWatcher(s.kubeClient, args.Revision)
-							controller := gateway.NewDeploymentController(s.kubeClient, s.clusterID, s.environment,
-								s.webhookInfo.getWebhookConfig, s.webhookInfo.addHandler, tagWatcher, args.Revision, nsFilter)
+							dc := gateway.NewDeploymentController(s.kubeClient, s.clusterID, s.environment,
+								s.webhookInfo.getWebhookConfig, s.webhookInfo.addHandler, args.Revision, nsFilter)
 							// Start informers again. This fixes the case where informers for namespace do not start,
 							// as we create them only after acquiring the leader lock
 							// Note: stop here should be the overall pilot stop, NOT the leader election stop. We are
 							// basically lazy loading the informer, if we stop it when we lose the lock we will never
 							// recreate it again.
 							s.kubeClient.RunAndWait(stop)
-							go tagWatcher.Run(leaderStop)
-							controller.Run(leaderStop)
+							dc.WaitUntilSynced(stop)
 						}
 					}).
 					Run(stop)

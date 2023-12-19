@@ -20,10 +20,16 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/onsi/gomega"
 	"github.com/pmezard/go-difflib/difflib"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"sigs.k8s.io/yaml"
 
 	"istio.io/istio/pkg/env"
 	"istio.io/istio/pkg/file"
+	"istio.io/istio/pkg/kube"
+	"istio.io/istio/pkg/kube/controllers"
 	"istio.io/istio/pkg/test"
 )
 
@@ -90,6 +96,37 @@ func CompareContent(t test.Failer, content []byte, goldenFile string) {
 	t.Helper()
 	golden := ReadGoldenFile(t, content, goldenFile)
 	CompareBytes(t, content, golden, goldenFile)
+}
+
+func CompareObjects(t test.Failer, client kube.Client, goldenFile string) {
+	t.Helper()
+	golden := ReadFile(t, goldenFile)
+
+	store := client.Dynamic().(*dynamicfake.FakeDynamicClient).Tracker()
+
+	for _, doc := range strings.Split(string(golden), "---\n") {
+		if len(strings.TrimSpace(doc)) == 0 {
+			continue
+		}
+		data := map[string]any{}
+		err := yaml.Unmarshal([]byte(doc), &data)
+		if err != nil {
+			t.Fatalf("Unable to parse golden file as yaml: %s", err)
+		}
+		us := unstructured.Unstructured{Object: data}
+		gvr, err := controllers.UnstructuredToGVR(us)
+		if err != nil {
+			t.Fatalf("Unable to parse golden file as unstructured: %s", err)
+		}
+
+		stored, err := store.Get(gvr, us.GetName(), us.GetNamespace())
+		if err != nil {
+			t.Fatalf("Unable to retrieve object [%s/%s/%s] from tracker: %s", gvr.Resource, us.GetNamespace(), us.GetName(), err)
+		}
+
+		g := gomega.NewGomegaWithT(t)
+		g.Expect(stored).To(gomega.BeEquivalentTo(&us))
+	}
 }
 
 // ReadGoldenFile reads the content of the golden file and fails the test if an error is encountered

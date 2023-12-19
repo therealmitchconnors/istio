@@ -18,18 +18,16 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/onsi/gomega"
-	"go.uber.org/atomic"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	k8sv1 "sigs.k8s.io/gateway-api/apis/v1"
 	"sigs.k8s.io/gateway-api/apis/v1alpha2"
 	"sigs.k8s.io/gateway-api/apis/v1beta1"
-	"sigs.k8s.io/yaml"
 
 	istioio_networking_v1beta1 "istio.io/api/networking/v1beta1"
 	istio_type_v1beta1 "istio.io/api/type/v1beta1"
@@ -49,12 +47,9 @@ import (
 	"istio.io/istio/pkg/kube/kclient/clienttest"
 	"istio.io/istio/pkg/kube/namespace"
 	istiolog "istio.io/istio/pkg/log"
-	"istio.io/istio/pkg/revisions"
 	"istio.io/istio/pkg/test"
 	"istio.io/istio/pkg/test/env"
-	"istio.io/istio/pkg/test/util/assert"
 	"istio.io/istio/pkg/test/util/file"
-	"istio.io/istio/pkg/test/util/retry"
 	"istio.io/istio/pkg/util/sets"
 )
 
@@ -284,36 +279,28 @@ func TestConfigureIstioGateway(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pc := patchChecker{data: map[patchKey][][]byte{}}
 			client := kube.NewFakeClient(tt.objects...)
 			kclient.NewWriteClient[*v1beta1.GatewayClass](client).Create(customClass)
 			kclient.NewWriteClient[*v1beta1.Gateway](client).Create(&tt.gw)
 			stop := test.NewStop(t)
 			env := model.NewEnvironment()
 			env.PushContext().ProxyConfigs = tt.pcs
-			tw := revisions.NewTagWatcher(client, "")
-			go tw.Run(stop)
 			d := NewDeploymentController(
 				client, cluster.ID(features.ClusterName), env, testInjectionConfig(t, tt.values), func(fn func()) {
-				}, tw, "", tt.discoveryNamespaceFilter)
-			d.patcher = func(gvr schema.GroupVersionResource, name string, namespace string, data []byte, subresources ...string) error {
-				b, err := yaml.JSONToYAML(data)
-				if err != nil {
-					return err
-				}
-				buf.Write(b)
-				buf.WriteString("---\n")
-				return nil
-			}
+				}, "", tt.discoveryNamespaceFilter)
+
 			client.RunAndWait(stop)
-			go d.Run(stop)
-			kube.WaitForCacheSync("test", stop, d.HasSynced)
+			d.WaitUntilSynced(stop)
 
 			if tt.ignore {
-				assert.Equal(t, buf.String(), "")
+				// ignore means no applyies should be sent
+				for _, act := range client.Kube().(*fake.Clientset).Actions() {
+					if act.GetVerb() == "apply" {
+						t.Errorf("unexpected action: %s", act)
+					}
+				}
 			} else {
-				resp := timestampRegex.ReplaceAll(buf.Bytes(), []byte("lastTransitionTime: fake"))
-				util.CompareContent(t, resp, filepath.Join("testdata", "deployment", tt.name+".yaml"))
+				util.CompareObjects(t, client, filepath.Join("testdata", "deployment", tt.name+".yaml"))
 			}
 		})
 	}
@@ -322,45 +309,45 @@ func TestConfigureIstioGateway(t *testing.T) {
 func TestVersionManagement(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 	log.SetOutputLevel(istiolog.DebugLevel)
-	writes := make(chan string, 10)
+	// writes := make(chan string, 10)
 	c := kube.NewFakeClient(&corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "default",
 		},
 	})
-	tw := revisions.NewTagWatcher(c, "default")
+	// tw := revisions.NewTagWatcher(c, "default")
 	env := &model.Environment{}
-	d := NewDeploymentController(c, "", env, testInjectionConfig(t, ""), func(fn func()) {}, tw, "", nil)
-	reconciles := atomic.NewInt32(0)
-	wantReconcile := int32(0)
-	expectNotReconcield := func() {
-		t.Helper()
-		g.Consistently(reconciles.Load).Within(100 * time.Millisecond).Should(gomega.Equal(wantReconcile))
-	}
-	expectReconciled := func() {
-		t.Helper()
-		wantReconcile++
-		assert.EventuallyEqual(t, reconciles.Load, wantReconcile, retry.Timeout(time.Second*5), retry.Message("no reconciliation"))
-		expectNotReconcield()
-	}
+	d := NewDeploymentController(c, "", env, testInjectionConfig(t, ""), func(fn func()) {}, "", nil)
+	// reconciles := atomic.NewInt32(0)
+	// wantReconcile := int32(0)
+	// expectNotReconcield := func() {
+	// 	t.Helper()
+	// 	g.Consistently(reconciles.Load).Within(100 * time.Millisecond).Should(gomega.Equal(wantReconcile))
+	// }
+	// expectReconciled := func() {
+	// 	t.Helper()
+	// 	wantReconcile++
+	// 	assert.EventuallyEqual(t, reconciles.Load, wantReconcile, retry.Timeout(time.Second*5), retry.Message("no reconciliation"))
+	// 	expectNotReconcield()
+	// }
 
-	d.patcher = func(g schema.GroupVersionResource, name string, namespace string, data []byte, subresources ...string) error {
-		if g == gvr.KubernetesGateway {
-			b, err := yaml.JSONToYAML(data)
-			if err != nil {
-				return err
-			}
-			writes <- string(b)
-			reconciles.Inc()
-		}
-		return nil
-	}
+	// d.patcher = func(g schema.GroupVersionResource, name string, namespace string, data []byte, subresources ...string) error {
+	// 	if g == gvr.KubernetesGateway {
+	// 		b, err := yaml.JSONToYAML(data)
+	// 		if err != nil {
+	// 			return err
+	// 		}
+	// 		writes <- string(b)
+	// 		reconciles.Inc()
+	// 	}
+	// 	return nil
+	// }
 	stop := test.NewStop(t)
-	gws := clienttest.Wrap(t, d.gateways)
-	go tw.Run(stop)
-	go d.Run(stop)
+	// gws := clienttest.Wrap(t, d.gateways)
+	// go tw.Run(stop)
 	c.RunAndWait(stop)
-	kube.WaitForCacheSync("test", stop, d.HasSynced)
+	d.WaitUntilSynced(stop)
+	// kube.WaitForCacheSync("test", stop, d.HasSynced)
 	// Create a gateway, we should mark our ownership
 	defaultGateway := &v1beta1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{
@@ -369,53 +356,58 @@ func TestVersionManagement(t *testing.T) {
 		},
 		Spec: v1beta1.GatewaySpec{GatewayClassName: defaultClassName},
 	}
+	ac := &ActionChecker{
+		predicate: func(action k8stesting.Action) bool {
+			return action.GetVerb() == "patch" && action.GetResource() == gvr.KubernetesGateway
+		},
+		failer: t,
+		fake:   &c.Kube().(*fake.Clientset).Fake,
+	}
+	gws := clienttest.Wrap(t, kclient.New[*v1beta1.Gateway](c))
 	gws.Create(defaultGateway)
-	assert.Equal(t, assert.ChannelHasItem(t, writes), buildPatch(ControllerVersion))
-	expectReconciled()
-	assert.ChannelIsEmpty(t, writes)
+	ac.CheckHasOccurred(1)
+
 	// Test fake doesn't actual do Apply, so manually do this
 	defaultGateway.Annotations = map[string]string{ControllerVersionAnnotation: fmt.Sprint(ControllerVersion)}
 	gws.Update(defaultGateway)
 	// We shouldn't write in response to our write.
-	assert.ChannelIsEmpty(t, writes)
+	ac.CheckHasOccurred(0)
+	g.Expect(ac.lastfound.(k8stesting.PatchActionImpl).Patch).To(gomega.BeEquivalentTo(buildPatch(ControllerVersion)))
 
 	defaultGateway.Annotations["foo"] = "bar"
 	gws.Update(defaultGateway)
 	// We should not be updating the version, its already set. Setting it introduces a possible race condition
 	// since we use SSA so there is no conflict checks.
-	assert.ChannelIsEmpty(t, writes)
+	ac.CheckHasOccurred(0)
 
 	// Somehow the annotation is removed - it should be added back
 	defaultGateway.Annotations = map[string]string{}
 	gws.Update(defaultGateway)
 	// TODO uncomment after drift detection enabled
-	expectReconciled()
-	assert.Equal(t, assert.ChannelHasItem(t, writes), buildPatch(ControllerVersion))
-	assert.ChannelIsEmpty(t, writes)
+	ac.CheckHasOccurred(1)
+	g.Expect(ac.lastfound.(k8stesting.PatchActionImpl).Patch).To(gomega.BeEquivalentTo(buildPatch(ControllerVersion)))
+
 	// Test fake doesn't actual do Apply, so manually do this
 	defaultGateway.Annotations = map[string]string{ControllerVersionAnnotation: fmt.Sprint(ControllerVersion)}
 	gws.Update(defaultGateway)
 	// We shouldn't write in response to our write.
-	assert.ChannelIsEmpty(t, writes)
+	ac.CheckHasOccurred(0)
 
 	// Somehow the annotation is set to an older version - it should be added back
 	defaultGateway.Annotations = map[string]string{ControllerVersionAnnotation: fmt.Sprint(1)}
 	gws.Update(defaultGateway)
-	expectReconciled()
-	assert.Equal(t, assert.ChannelHasItem(t, writes), buildPatch(ControllerVersion))
-	assert.ChannelIsEmpty(t, writes)
+	ac.CheckHasOccurred(1)
+	g.Expect(ac.lastfound.(k8stesting.PatchActionImpl).Patch).To(gomega.BeEquivalentTo(buildPatch(ControllerVersion)))
 	// Test fake doesn't actual do Apply, so manually do this
 	defaultGateway.Annotations = map[string]string{ControllerVersionAnnotation: fmt.Sprint(ControllerVersion)}
 	gws.Update(defaultGateway)
 	// We shouldn't write in response to our write.
-	assert.ChannelIsEmpty(t, writes)
+	ac.CheckHasOccurred(0)
 
 	// Somehow the annotation is set to an new version - we should do nothing
 	defaultGateway.Annotations = map[string]string{ControllerVersionAnnotation: fmt.Sprint(10)}
 	gws.Update(defaultGateway)
-	assert.ChannelIsEmpty(t, writes)
-	// Do not expect reconcile
-	expectNotReconcield()
+	ac.CheckHasOccurred(0)
 }
 
 func testInjectionConfig(t test.Failer, values string) func() inject.WebhookConfig {
@@ -495,3 +487,39 @@ func (d *fakeDiscoveryNamespacesFilter) GetMembers() sets.String {
 }
 
 func (d *fakeDiscoveryNamespacesFilter) AddHandler(f func(ns string, event model.Event)) {}
+
+type ActionChecker struct {
+	predicate func(action k8stesting.Action) bool
+	lastfound k8stesting.Action
+	failer    *testing.T
+	fake      *k8stesting.Fake
+	g         gomega.Gomega
+}
+
+func (a *ActionChecker) CheckHasOccurred(n int) {
+	a.failer.Helper()
+	if a.g == nil {
+		a.g = gomega.NewGomegaWithT(a.failer)
+	}
+	newActions := []k8stesting.Action{}
+	addNewActions := func() []k8stesting.Action {
+		newActions = append(newActions, a.NewOccurrences()...)
+		return newActions
+	}
+	a.g.Eventually(addNewActions).Should(gomega.HaveLen(n))
+	a.g.Consistently(addNewActions).Should(gomega.HaveLen(n))
+}
+
+func (a *ActionChecker) NewOccurrences() []k8stesting.Action {
+	foundLast := a.lastfound != nil
+	results := []k8stesting.Action{}
+	for _, action := range a.fake.Actions() {
+		if !foundLast {
+			foundLast = a.lastfound == action
+		} else if a.predicate(action) {
+			results = append(results, action)
+			a.lastfound = action
+		}
+	}
+	return results
+}

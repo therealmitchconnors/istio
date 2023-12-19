@@ -61,3 +61,7 @@ func (c multiSyncer) WaitUntilSynced(stop <-chan struct{}) bool {
 	}
 	return true
 }
+
+func NewMultiSyncer(syncers ...Syncer) Syncer {
+	return multiSyncer{syncers: syncers}
+}

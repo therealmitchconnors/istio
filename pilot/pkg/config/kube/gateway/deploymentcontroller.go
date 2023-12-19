@@ -16,19 +16,17 @@ package gateway
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	klabels "k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/cache"
+	appsv1ac "k8s.io/client-go/applyconfigurations/apps/v1"
+	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
 	gateway "sigs.k8s.io/gateway-api/apis/v1beta1"
 	"sigs.k8s.io/yaml"
 
@@ -43,9 +41,10 @@ import (
 	"istio.io/istio/pkg/kube"
 	"istio.io/istio/pkg/kube/controllers"
 	"istio.io/istio/pkg/kube/inject"
-	"istio.io/istio/pkg/kube/kclient"
 	"istio.io/istio/pkg/kube/krt"
+	"istio.io/istio/pkg/kube/kubetypes"
 	"istio.io/istio/pkg/kube/namespace"
+	"istio.io/istio/pkg/ptr"
 	"istio.io/istio/pkg/revisions"
 	"istio.io/istio/pkg/test/util/tmpl"
 	"istio.io/istio/pkg/test/util/yml"
@@ -76,18 +75,12 @@ import (
 //   - SSA using standard API types doesn't work well either: https://github.com/kubernetes-sigs/controller-runtime/issues/1669
 //   - This leaves YAML templates, converted to unstructured types and Applied with the dynamic client.
 type DeploymentController struct {
-	client         kube.Client
-	clusterID      cluster.ID
-	env            *model.Environment
-	patcher        patcher
-	gateways       kclient.Client[*gateway.Gateway]
-	namespaces     kclient.Client[*corev1.Namespace]
-	gatewayClasses kclient.Client[*gateway.GatewayClass]
-
-	clients      map[schema.GroupVersionResource]getter
+	client       kube.Client
+	clusterID    cluster.ID
+	env          *model.Environment
 	injectConfig krt.Singleton[inject.WebhookConfig]
-
-	revision string
+	revision     string
+	syncer       krt.Syncer
 }
 
 // Patcher is a function that abstracts patching logic. This is largely because client-go fakes do not handle patching
@@ -167,109 +160,39 @@ func getClassInfos() map[gateway.GatewayController]classInfo {
 // NewDeploymentController constructs a DeploymentController and registers required informers.
 // The controller will not start until Run() is called.
 func NewDeploymentController(client kube.Client, clusterID cluster.ID, env *model.Environment,
-	webhookConfig func() inject.WebhookConfig, injectionHandler func(fn func()), tw revisions.TagWatcher, revision string,
+	webhookConfig func() inject.WebhookConfig, injectionHandler func(fn func()), revision string,
 	nsFilter namespace.DiscoveryNamespacesFilter,
 ) *DeploymentController {
 	var filter namespace.DiscoveryFilter
 	if nsFilter != nil {
 		filter = nsFilter.Filter
 	}
-	gateways := kclient.NewFiltered[*gateway.Gateway](client, kclient.Filter{ObjectFilter: filter})
-	gatewayClasses := kclient.New[*gateway.GatewayClass](client)
-	dc := &DeploymentController{
-		client:    client,
-		clusterID: clusterID,
-		clients:   map[schema.GroupVersionResource]getter{},
-		env:       env,
-		patcher: func(gvr schema.GroupVersionResource, name string, namespace string, data []byte, subresources ...string) error {
-			c := client.Dynamic().Resource(gvr).Namespace(namespace)
-			t := true
-			_, err := c.Patch(context.Background(), name, types.ApplyPatchType, data, metav1.PatchOptions{
-				Force:        &t,
-				FieldManager: constants.ManagedGatewayController,
-			}, subresources...)
-			return err
-		},
-		gateways:       gateways,
-		injectConfig:   krtInjectionConfig,
-		revision:       revision,
-		namespaces:     kclient.New[*corev1.Namespace](client),
-		gatewayClasses: kclient.New[*gateway.GatewayClass](client),
-	}
-
-	// Set up a handler that will add the parent Gateway object onto the queue.
-	// The queue will only handle Gateway objects; if child resources (Service, etc) are updated we re-add
-	// the Gateway to the queue and reconcile the state of the world.
-	// parentHandler := controllers.ObjectHandler(controllers.EnqueueForParentHandler(controllers.NewQueue("foo"), gvk.KubernetesGateway))
-
-	dc.services = kclient.NewFiltered[*corev1.Service](client, kclient.Filter{ObjectFilter: filter})
-	dc.services.AddEventHandler(parentHandler)
-	dc.clients[gvr.Service] = NewUntypedWrapper(dc.services)
-
-	dc.deployments = kclient.NewFiltered[*appsv1.Deployment](client, kclient.Filter{ObjectFilter: filter})
-	dc.deployments.AddEventHandler(parentHandler)
-	dc.clients[gvr.Deployment] = NewUntypedWrapper(dc.deployments)
-
-	dc.serviceAccounts = kclient.NewFiltered[*corev1.ServiceAccount](client, kclient.Filter{ObjectFilter: filter})
-	dc.serviceAccounts.AddEventHandler(parentHandler)
-	dc.clients[gvr.ServiceAccount] = NewUntypedWrapper(dc.serviceAccounts)
-
-	dc.namespaces = kclient.NewFiltered[*corev1.Namespace](client, kclient.Filter{ObjectFilter: filter})
-	dc.namespaces.AddEventHandler(controllers.ObjectHandler(func(o controllers.Object) {
-		// TODO: make this more intelligent, checking if something we care about has changed
-		// requeue this namespace
-		for _, gw := range dc.gateways.List(o.GetName(), klabels.Everything()) {
-			dc.queue.AddObject(gw)
-		}
-	}))
-
-	gateways.AddEventHandler(controllers.ObjectHandler(dc.queue.AddObject))
-	gatewayClasses.AddEventHandler(controllers.ObjectHandler(func(o controllers.Object) {
-		for _, g := range dc.gateways.List(metav1.NamespaceAll, klabels.Everything()) {
-			if string(g.Spec.GatewayClassName) == o.GetName() {
-				dc.queue.AddObject(g)
-			}
-		}
-	}))
-
-	// On injection template change, requeue all gateways
-	injectionHandler(func() {
-		for _, gw := range dc.gateways.List(metav1.NamespaceAll, klabels.Everything()) {
-			dc.queue.AddObject(gw)
-		}
+	krtInjectionConfig := krt.WrapHandler[inject.WebhookConfig](injectionHandler, func() *inject.WebhookConfig {
+		result := webhookConfig()
+		return &result
 	})
-
-	dc.tagWatcher.AddHandler(dc.HandleTagChange)
-
-	return dc
-}
-
-func (d *DeploymentController) Run(stop <-chan struct{}) {
-
-	ntw := revisions.GetNewerTagWatcher(d.client, d.revision)
-
-	d.clients[gvr.Namespace] = NewUntypedWrapper(d.namespaces)
-	kns := krt.WrapClient[*corev1.Namespace](d.namespaces)
-
-	d.clients[gvr.GatewayClass] = NewUntypedWrapper(d.gatewayClasses)
-	kgwc := krt.WrapClient(d.gatewayClasses)
-
-	d.clients[gvr.KubernetesGateway] = NewUntypedWrapper(d.gateways)
-	kgw := krt.WrapClient[*gateway.Gateway](d.gateways)
-
-	iss := []cache.InformerSynced{}
-	infs := []controllers.Shutdowner{}
-	for _, i := range d.clients {
-		iss = append(iss, i.HasSynced)
-		infs = append(infs, i)
+	dc := &DeploymentController{
+		client:       client,
+		clusterID:    clusterID,
+		env:          env,
+		injectConfig: krtInjectionConfig,
+		revision:     revision,
 	}
-	kube.WaitForCacheSync(
-		"deployment controller",
-		stop,
-		iss...,
-	)
 
-	patches := krt.NewManyCollection[*gateway.Gateway, patchInput](kgw, func(ctx krt.HandlerContext, gw *gateway.Gateway) []patchInput {
+	ntw := revisions.GetNewerTagWatcher(dc.client, dc.revision)
+	kns := krt.NewInformerFiltered[*corev1.Namespace](client, kubetypes.Filter{ObjectFilter: filter})
+	kgwc := krt.NewInformer[*gateway.GatewayClass](client)
+	kgw := krt.NewInformerFiltered[*gateway.Gateway](client, kubetypes.Filter{ObjectFilter: filter})
+
+	outSvc := krt.NewPuttableCollection[corev1ac.ServiceApplyConfiguration]()
+	outGW := krt.NewPuttableCollection[patchInput]()
+	outSA := krt.NewPuttableCollection[corev1ac.ServiceAccountApplyConfiguration]()
+
+	var deployments krt.Collection[controllers.Object]
+	services := krt.ApplyToK8s(outSvc, client)
+	serviceAccounts := krt.ApplyToK8s(outSA, client)
+
+	deploymentACs := krt.NewCollection[*gateway.Gateway, appsv1ac.DeploymentApplyConfiguration](kgw, func(ctx krt.HandlerContext, gw *gateway.Gateway) *appsv1ac.DeploymentApplyConfiguration {
 		if !IsManaged(&gw.Spec) {
 			return nil
 		}
@@ -334,59 +257,106 @@ func (d *DeploymentController) Run(stop <-chan struct{}) {
 			DeploymentName: model.GetOrDefault(gw.Annotations[gatewayNameOverride], defaultName),
 			ServiceAccount: model.GetOrDefault(gw.Annotations[gatewaySAOverride], defaultName),
 			Ports:          extractServicePorts(*gw),
-			ClusterID:      d.clusterID.String(),
+			ClusterID:      dc.clusterID.String(),
 
-			KubeVersion122: kube.IsAtLeastVersion(d.client, 22),
-			Revision:       d.revision,
+			KubeVersion122: kube.IsAtLeastVersion(dc.client, 22),
+			Revision:       dc.revision,
 			ServiceType:    serviceType,
 			ProxyUID:       proxyUID,
 			ProxyGID:       proxyGID,
 		}
-		result := []patchInput{}
 		if overwriteControllerVersion {
 			log.Debugf("write controller version, existing=%v", existingControllerVersion)
-			result = append(result, d.setGatewayControllerVersion(*gw))
+			outGW.Put(dc.setGatewayControllerVersion(*gw))
 		} else {
 			log.Debugf("controller version existing=%v, no action needed", existingControllerVersion)
 		}
 
-		rendered, err := d.render(ctx, ci.templates, input)
+		rendered, err := dc.render(ctx, ci.templates, input)
 		if err != nil {
 			log.Errorf("failed to render template: %v", err)
 		}
-		for _, t := range rendered {
-			pi, err := d.apply(ci.controller, t)
-			if err != nil {
-				log.Errorf("apply failed: %v", err)
-			}
-			result = append(result, pi)
+		svcac, saac, depac, err := unmarshalRendered(rendered)
+		if err != nil {
+			log.Errorf("failed to unmarshal rendered template: %v", err)
 		}
 
-		log.Info("gateway rendered, queueing for patch")
+		svc := krt.FetchOne(ctx, services, krt.FilterName(*svcac.Name, *svcac.Namespace))
+		if ok, rv := dc.canManage(*svc); ok {
+			outSvc.Put(svcac.WithResourceVersion(rv))
+		}
+		sa := krt.FetchOne(ctx, serviceAccounts, krt.FilterName(*saac.Name, *saac.Namespace))
+		if ok, rv := dc.canManage(*sa); ok {
+			outSA.Put(saac.WithResourceVersion(rv))
+		}
 
-		return result // TODO: do we need a differenct contract?
-	})
-	// Do the applying in a single collection so that events that produce duplicate patches don't hit k8s
-	krt.NewCollection[patchInput, string](patches, func(ctx krt.HandlerContext, patch patchInput) *string {
-		log.Debugf("applying patch %v/%s/%s", patch.gvr, patch.namespace, patch.name)
-		if err := d.patcher(patch.gvr, patch.name, patch.namespace, []byte(patch.patch)); err != nil {
-			log.Errorf("patch failed: %v", err)
+		dep := krt.FetchOne(ctx, deployments, krt.FilterName(*depac.Name, *depac.Namespace))
+		if ok, rv := dc.canManage(*dep); ok {
+			return depac.WithResourceVersion(rv)
 		}
 		return nil
 	})
-	<-stop
-	controllers.ShutdownAll(infs...)
+
+	deployments = krt.ApplyToK8s(deploymentACs, client)
+
+	krt.NewCollection[patchInput, string](outGW, func(ctx krt.HandlerContext, gw patchInput) *string {
+		t := true
+		_, err := client.Dynamic().Resource(gvr.KubernetesGateway).Namespace(gw.namespace).
+			Patch(context.Background(), gw.name, types.ApplyPatchType, []byte(gw.patch), metav1.PatchOptions{
+				Force:        &t,
+				FieldManager: constants.ManagedGatewayController,
+			})
+		if err != nil {
+			log.Error(err)
+		}
+		return ptr.Of[string]("")
+	})
+
+	dc.syncer = krt.NewMultiSyncer(deploymentACs.Synced(), outSvc.Synced(), outGW.Synced(), outSA.Synced())
+
+	return dc
 }
 
-func (d *DeploymentController) HasSynced() bool {
-	for g, i := range d.clients {
-		if !i.HasSynced() {
-			log.Debugf("not synced %v", g)
-			return false
+func unmarshalRendered(rendered []string) (svcac *corev1ac.ServiceApplyConfiguration,
+	saac *corev1ac.ServiceAccountApplyConfiguration, depac *appsv1ac.DeploymentApplyConfiguration, err error) {
+	for _, t := range rendered {
+		data := map[string]any{}
+		err = yaml.Unmarshal([]byte(t), &data)
+		if err != nil {
+			log.Error(err)
 		}
-		log.Debugf("synced %v", g)
+		us := unstructured.Unstructured{Object: data}
+
+		var mygvr schema.GroupVersionResource
+		mygvr, err = controllers.UnstructuredToGVR(us)
+		if err != nil {
+			return
+		}
+		switch mygvr {
+		case gvr.Service:
+			err = yaml.Unmarshal([]byte(t), svcac)
+			if err != nil {
+				return
+			}
+		case gvr.ServiceAccount:
+			err = yaml.Unmarshal([]byte(t), saac)
+			if err != nil {
+				return
+			}
+		case gvr.Deployment:
+			err = yaml.Unmarshal([]byte(t), depac)
+			if err != nil {
+				return
+			}
+		default:
+			panic("unknown gvr")
+		}
 	}
-	return true
+	return
+}
+
+func (d *DeploymentController) WaitUntilSynced(stop <-chan struct{}) {
+	d.syncer.WaitUntilSynced(stop)
 }
 
 const (
@@ -477,11 +447,11 @@ func (d *DeploymentController) render(ctx krt.HandlerContext, templateName strin
 	return yml.SplitString(results), nil
 }
 
-func (d *DeploymentController) setGatewayControllerVersion(gws gateway.Gateway) patchInput {
+func (d *DeploymentController) setGatewayControllerVersion(gws gateway.Gateway) *patchInput {
 	patch := fmt.Sprintf(`{"apiVersion":"gateway.networking.k8s.io/v1beta1","kind":"Gateway","metadata":{"annotations":{"%s":"%d"}}}`,
 		ControllerVersionAnnotation, ControllerVersion)
 
-	return patchInput{
+	return &patchInput{
 		gvr:       gvr.KubernetesGateway,
 		name:      gws.GetName(),
 		namespace: gws.GetNamespace(),
@@ -489,62 +459,11 @@ func (d *DeploymentController) setGatewayControllerVersion(gws gateway.Gateway) 
 	}
 }
 
-// apply server-side applies a template to the cluster.
-func (d *DeploymentController) apply(controller string, yml string) (result patchInput, err error) {
-	data := map[string]any{}
-	err = yaml.Unmarshal([]byte(yml), &data)
-	if err != nil {
-		return
-	}
-	us := unstructured.Unstructured{Object: data}
-	// set managed-by label
-	clabel := strings.ReplaceAll(controller, "/", "-")
-	err = unstructured.SetNestedField(us.Object, clabel, "metadata", "labels", constants.ManagedGatewayLabel)
-	if err != nil {
-		return
-	}
-	gvr, err := controllers.UnstructuredToGVR(us)
-	if err != nil {
-		return
-	}
-	j, err := json.Marshal(us.Object)
-	if err != nil {
-		return
-	}
-	canManage, resourceVersion := d.canManage(gvr, us.GetName(), us.GetNamespace())
-	if !canManage {
-		log.Debugf("skipping %v/%v/%v, already managed", gvr, us.GetName(), us.GetNamespace())
-		return
-	}
-	// Ensure our canManage assertion is not stale
-	us.SetResourceVersion(resourceVersion)
-
-	log.Debugf("applying %v", string(j))
-	if err := d.patcher(gvr, us.GetName(), us.GetNamespace(), j); err != nil {
-		return fmt.Errorf("patch %v/%v/%v: %v", us.GroupVersionKind(), us.GetNamespace(), us.GetName(), err)
-	}
-	return nil
-}
-
-func (d *DeploymentController) HandleTagChange(newTags sets.String) {
-	for _, gw := range d.gateways.List(metav1.NamespaceAll, klabels.Everything()) {
-		d.queue.AddObject(gw)
-	}
-}
-
 // canManage checks if a resource we are about to write should be managed by us. If the resource already exists
 // but does not have the ManagedGatewayLabel, we won't overwrite it.
 // This ensures we don't accidentally take over some resource we weren't supposed to, which could cause outages.
 // Note K8s doesn't have a perfect way to "conditionally SSA", but its close enough (https://github.com/kubernetes/kubernetes/issues/116156).
-func (d *DeploymentController) canManage(gvr schema.GroupVersionResource, name, namespace string) (bool, string) {
-	store, f := d.clients[gvr]
-	if !f {
-		log.Warnf("unknown GVR %v", gvr)
-		// Even though we don't know what it is, allow users to put the resource. We won't be able to
-		// protect against overwrites though.
-		return true, ""
-	}
-	obj := store.Get(name, namespace)
+func (d *DeploymentController) canManage(obj metav1.Object) (bool, string) {
 	if obj == nil {
 		// no object, we can manage it
 		return true, ""
@@ -595,39 +514,6 @@ func extractServicePorts(gw gateway.Gateway) []corev1.ServicePort {
 	}
 	return svcPorts
 }
-
-// UntypedWrapper wraps a typed reader to an untyped one, since Go cannot do it automatically.
-type UntypedWrapper[T controllers.ComparableObject] struct {
-	reader kclient.Informer[T]
-}
-type getter interface {
-	Get(name, namespace string) controllers.Object
-	HasSynced() bool
-	ShutdownHandlers()
-}
-
-func NewUntypedWrapper[T controllers.ComparableObject](c kclient.Client[T]) getter {
-	return UntypedWrapper[T]{c}
-}
-
-func (u UntypedWrapper[T]) Get(name, namespace string) controllers.Object {
-	// DO NOT return u.reader.Get directly, or we run into issues with https://go.dev/tour/methods/12
-	res := u.reader.Get(name, namespace)
-	if controllers.IsNil(res) {
-		return nil
-	}
-	return res
-}
-
-func (u UntypedWrapper[T]) HasSynced() bool {
-	return u.reader.HasSynced()
-}
-
-func (u UntypedWrapper[T]) ShutdownHandlers() {
-	u.reader.ShutdownHandlers()
-}
-
-var _ getter = UntypedWrapper[*corev1.Service]{}
 
 type patchInput struct {
 	name, namespace, patch string

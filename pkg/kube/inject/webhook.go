@@ -49,6 +49,7 @@ import (
 	"istio.io/istio/pkg/config/mesh"
 	"istio.io/istio/pkg/kube"
 	"istio.io/istio/pkg/kube/kclient"
+	"istio.io/istio/pkg/kube/krt"
 	"istio.io/istio/pkg/log"
 	"istio.io/istio/pkg/platform"
 	"istio.io/istio/pkg/slices"
@@ -97,6 +98,13 @@ type WebhookConfig struct {
 	Templates  Templates
 	Values     ValuesConfig
 	MeshConfig *meshconfig.MeshConfig
+}
+
+var _ krt.ResourceNamer = &WebhookConfig{}
+
+// ResourceName implements the krt.ResourceNamer interface until krt.Singleton.AsCollection() handles keys better.
+func (wc *WebhookConfig) ResourceName() string {
+	return "istio-injector-config"
 }
 
 // Webhook implements a mutating webhook for automatic proxy injection.

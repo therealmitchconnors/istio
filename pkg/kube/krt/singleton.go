@@ -169,8 +169,10 @@ func NewSingleton[O any](hf TransformationEmpty[O], opts ...CollectionOption) Si
 	return collectionAdapter[O]{col}
 }
 
-func WrapHandler[O any](triggerCallBack func(fn func()), lister TransformationEmpty[O], opts ...CollectionOption) Singleton[O] {
-	result := NewSingleton[O](lister, opts...)
-	triggerCallBack(result.(*singleton[O]).execute)
+func WrapHandler[O any](triggerCallBack func(fn func()), lister func() *O, opts ...CollectionOption) Singleton[O] {
+	result := NewSingleton(func(_ HandlerContext) *O {
+		return lister()
+	}).(StaticSingleton[O])
+	triggerCallBack(func() { result.Set(lister()) })
 	return result
 }

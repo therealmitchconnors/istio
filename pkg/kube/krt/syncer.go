@@ -39,7 +39,7 @@ import (
 	"sigs.k8s.io/structured-merge-diff/v4/typed"
 )
 
-func ApplyToK8s[T any](g Collection[T], c kube.Client) {
+func ApplyToK8s[T any](g Collection[T], c kube.Client) Collection[controllers.Object] {
 
 	myGVR := kubeclient.GetGVRFromApplyConfigType(reflect.TypeOf(ptr.Empty[T]()))
 
@@ -74,6 +74,7 @@ func ApplyToK8s[T any](g Collection[T], c kube.Client) {
 			}
 		},
 	)
+	return ic
 }
 
 // convertToUnstructured could be replaced by runtime.Scheme.Convert(), but we don't have a scheme here
