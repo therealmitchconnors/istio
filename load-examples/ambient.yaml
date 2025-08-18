@@ -1,0 +1,28 @@
+nodeMetadata: {}
+jitter:
+  workloads: "10s"
+  config: "0s"
+namespaces:
+- name: mesh
+  # 100 replicas: 30k pods, 2k services
+  # 666 replicas: 200k pods, 13.3k services
+  # replicas: 666
+  replicas: 100
+  # 300 pods, 20 services
+  applications:
+  - name: big
+    replicas: 1
+    pods: 2
+    type: ambient # No sidecar needed
+  - name: med
+    replicas: 1
+    pods: 1
+    type: ambient # No sidecar needed
+  - name: small
+    replicas: 1
+    pods: 1
+    type: ambient # No sidecar needed
+nodes:
+- name: node
+  count: 2
+  ztunnel: {}

@@ -1,0 +1,12 @@
+nodeMetadata: {}
+jitter:
+  workloads: "10s"
+  config: "0s"
+namespaces:
+- name: mesh
+  replicas: 1
+  applications:
+  - name: big
+    replicas: 1
+    pods: 1
+    type: sidecar

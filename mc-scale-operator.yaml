@@ -1,0 +1,15 @@
+apiVersion: insall.istio.io/v1alpha1
+kind: IstioOperator
+spec:
+  meshConfig:
+    accessLogFile: /dev/stdout
+  profile: ambient
+  components:
+    pilot:
+      k8s:
+        env:
+          - name: AMBIENT_ENABLE_MULTI_NETWORK
+            value: "true"
+  values:
+    global:
+      meshID: mesh1

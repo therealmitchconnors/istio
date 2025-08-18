@@ -220,6 +220,51 @@ if [[ -n "${PARAMS:-}" ]]; then
   trace "test" make "${PARAMS[*]}"
 fi
 
+echo "fhqwgads"
+mkdir "${ARTIFACTS}/certs"
+pushd "${ARTIFACTS}/certs"
+make -f ${ROOT}/tools/certs/Makefile.selfsigned.mk root-ca
+export CLUSTER_SECRETS
+
+ITER_END=$((NUM_CLUSTERS-1))
+for i in $(seq 0 "$ITER_END"); do
+  c="${CLUSTER_NAMES[i]}"
+  kc="--kubeconfig ../kubeconfig/${c}"
+  # setup trust
+  make -f ${ROOT}/tools/certs/Makefile.selfsigned.mk "${c}-cacerts"
+  kubectl create ns istio-system $kc
+  kubectl create secret generic cacerts -n istio-system $kc \
+      --from-file=${c}/ca-cert.pem \
+      --from-file=${c}/ca-key.pem \
+      --from-file=${c}/root-cert.pem \
+      --from-file=${c}/cert-chain.pem
+
+  # install istio
+  istioctl install -f ${ROOT}/mc-scale-operator.yaml -y $kc \
+    --set values.global.multiCluster.clusterName=${c} --set values.global.network=${CLUSTER_NETWORK_ID[i]}
+
+  # install e/w gateways
+  kubectl kustomize "github.com/kubernetes-sigs/gateway-api/config/crd?ref=v1.3.0" | kubectl apply $kc -f -
+  ${ROOT}/samples/multicluster/gen-eastwest-gateway.sh \
+    --network "${CLUSTER_NETWORK_ID[i]}" \
+    --ambient | \
+    kubectl apply $kc -f -
+
+  # add to remote cluster list
+  CLUSTER_SECRETS+=($(istioctl create-remote-secret $kc --name $c))
+
+done
+
+for o in $(seq 0 "$ITER_END"); do
+  for i in $(seq 0 "$ITER_END"); do
+    if [[ $i != $o ]]; then
+      echo ${CLUSTER_SECRETS[i]} | kubectl apply --kubeconfig ../kubeconfig/${CLUSTER_NAMES[o]} -f -
+    fi
+  done
+done
+popd
+
+
 # Check if the user is running the clusters in manual mode.
 if [[ -n "${MANUAL:-}" ]]; then
   echo "Running cluster(s) in manual mode. Press any key to shutdown and exit..."

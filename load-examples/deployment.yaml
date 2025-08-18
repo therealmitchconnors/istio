@@ -1,0 +1,100 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pilot-load
+  namespace: pilot-load
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pilot-load
+  namespace: pilot-load
+  labels:
+    app: pilot-load
+spec:
+  replicas: 1
+  template:
+    metadata:
+      name: pilot-load
+      annotations:
+        sidecar.istio.io/inject: "false"
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8765"
+      labels:
+        app: pilot-load
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              namespaces: [istio-system]
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - istiod
+              topologyKey: kubernetes.io/hostname
+      # May take a while to shut down
+      terminationGracePeriodSeconds: 10
+      serviceAccountName: pilot-load
+      containers:
+      - name: pilot-load
+        image: therealmitchconnors/pilot-load
+        imagePullPolicy: Always
+        args:
+          - "cluster"
+          - "--pilot-address=istiod.istio-system:15010"
+          - "--config=/etc/config/config/config.yaml"
+          - "--qps=5000"
+        resources:
+          requests:
+            cpu: 4000m
+            memory: 4Gi
+        volumeMounts:
+        - name: config
+          mountPath: /etc/config/config
+      volumes:
+      - name: config
+        configMap:
+          name: pilot-load-config
+  selector:
+    matchLabels:
+      app: pilot-load
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pilot-load
+  namespace: pilot-load
+rules:
+  - apiGroups: [""]
+    resources: ["*"]
+    verbs: ["get", "watch", "list", "create", "patch", "update", "delete"]
+  - apiGroups: ["config.istio.io", "security.istio.io", "networking.istio.io", "authentication.istio.io", "rbac.istio.io", "telemetry.istio.io"]
+    verbs: ["get", "watch", "list", "create", "patch", "update", "delete"]
+    resources: ["*"]
+  - apiGroups: ["coordination.k8s.io"]
+    verbs: ["get", "watch", "list", "create", "patch", "update", "delete"]
+    resources: ["*"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["mutatingwebhookconfigurations"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pilot-load-binding
+  namespace: pilot-load
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pilot-load
+subjects:
+  - kind: ServiceAccount
+    name: pilot-load
+    namespace: pilot-load

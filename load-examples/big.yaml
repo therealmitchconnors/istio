@@ -1,0 +1,14 @@
+nodeMetadata: {}
+jitter:
+  workloads: "110ms"
+  config: "0s"
+namespaces:
+- name: mesh
+  replicas: 1
+  applications:
+  - name: big
+    replicas: 200
+    pods: 10
+nodes:
+- name: node
+  count: 10
