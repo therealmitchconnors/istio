@@ -1,0 +1,37 @@
+[
+  {
+    "kind": "Kubernetes",
+    "clusterName": "cluster-1",
+    "podSubnet": "10.10.0.0/16",
+    "svcSubnet": "10.255.8.0/21",
+    "network": "network-1"
+  },
+  {
+    "kind": "Kubernetes",
+    "clusterName": "cluster-2",
+    "podSubnet": "10.30.0.0/16",
+    "svcSubnet": "10.255.16.0/21",
+    "network": "network-2"
+  },
+  {
+    "kind": "Kubernetes",
+    "clusterName": "cluster-3",
+    "podSubnet": "10.50.0.0/16",
+    "svcSubnet": "10.255.24.0/21",
+    "network": "network-3"
+  },
+  {
+    "kind": "Kubernetes",
+    "clusterName": "cluster-4",
+    "podSubnet": "10.70.0.0/16",
+    "svcSubnet": "10.255.32.0/21",
+    "network": "network-4"
+  },
+  {
+    "kind": "Kubernetes",
+    "clusterName": "cluster-5",
+    "podSubnet": "10.90.0.0/16",
+    "svcSubnet": "10.255.40.0/21",
+    "network": "network-5"
+  }
+]

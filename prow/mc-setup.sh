@@ -79,12 +79,15 @@ for i in $(seq 0 "$ITER_END"); do
         --from-file=${c}/cert-chain.pem; }
 
   # install istio
+  kubectl $kc get crd gateways.gateway.networking.k8s.io &> /dev/null || \
+    kubectl kustomize "github.com/kubernetes-sigs/gateway-api/config/crd?ref=v1.3.0" | kubectl apply $kc -f -
+  
   istioctl install -f ${ROOT}/mc-scale-operator.yaml -y $kc \
-    --set values.global.multiCluster.clusterName=${c} --set values.global.network=${CLUSTER_NETWORK_ID[i]}
+    --set values.global.multiCluster.clusterName=${c} --set values.global.network=${CLUSTER_NETWORK_ID[i]} \
+    --set tag=$TAG --set hub=gcr.io/istio-testing
+  kubectl $kc delete hpa -n istio-system istiod
 
   # install e/w gateways
-  kubectl get crd gateways.gateway.networking.k8s.io &> /dev/null || \
-    kubectl kustomize "github.com/kubernetes-sigs/gateway-api/config/crd?ref=v1.3.0" | kubectl apply $kc -f -
   ${ROOT}/samples/multicluster/gen-eastwest-gateway.sh \
     --network "${CLUSTER_NETWORK_ID[i]}" \
     --ambient | \
@@ -121,8 +124,17 @@ for i in $(seq 0 "$ITER_END"); do
   kc="--kubeconfig ${CLUSTER_KUBECONFIGS[i]}"
   kubectl $kc get ns pilot-load &> /dev/null || \
     { kubectl create ns pilot-load $kc; }
-  kubectl $kc get cm -n pilot-load pilot-load-config &> /dev/null || \
-    { kubectl $kc create configmap --from-file config.yaml=load-examples/ambient.yaml pilot-load-config -n pilot-load; }
+  kubectl $kc get cm -n pilot-load pilot-load-config &> /dev/null && \
+    { kubectl $kc delete configmap pilot-load-config -n pilot-load; }
+  
+  kubectl $kc create configmap --from-file config.yaml=load-examples/ambient-waypoint.yaml pilot-load-config -n pilot-load
+  # kubectl $kc create configmap --from-file config.yaml=load-examples/ambient.yaml pilot-load-config -n pilot-load
+  
+  startgen=$(kubectl $kc get -n pilot-load deployment/pilot-load -o jsonpath='{.metadata.generation}' || echo 0)
   kubectl $kc apply -f load-examples/deployment.yaml
+  endgen=$(kubectl $kc get -n pilot-load deployment/pilot-load -o jsonpath='{.metadata.generation}' || echo 0)
+  if [[ $startgen -eq $endgen ]]; then
+      kubectl $kc rollout restart -n pilot-load deployment/pilot-load
+  fi
 
 done

@@ -6,7 +6,8 @@
     "USE_GKE_GCLOUD_AUTH_PLUGIN": "True",
     "BUILD_WITH_CONTAINER": "0",
     "CARGO_HOME": "/home/.cargo",
-    "RUSTUP_HOME": "/home/.rustup"
+    "RUSTUP_HOME": "/home/.rustup",
+    "DEVCONTAINER": "1"
   },
   "features": {
     "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {},

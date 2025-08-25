@@ -1,22 +1,26 @@
 stableNames: true
 nodeMetadata: {}
 jitter:
-  workloads: "2s"
+  workloads: "10s"
   config: "0s"
 namespaces:
   - name: mesh
     # 100 namespaces == 1k services 10k pods
-    replicas: 10
+    replicas: 100
     waypoint: waypoint
     applications:
       - name: waypoint
         pods: 2 # HA
         type: waypoint
+        labels:
+          istio.io/global: "true"
       - name: app
-        replicas: 10
+        replicas: 4
         pods: 10
         type: ambient
+        labels:
+          istio.io/global: "true"
 nodes:
   - name: node
-    count: 50
+    count: 17
     ztunnel: {}

@@ -1,4 +1,5 @@
 nodeMetadata: {}
+stableNames: true
 jitter:
   workloads: "10s"
   config: "0s"
@@ -12,17 +13,23 @@ namespaces:
   applications:
   - name: big
     replicas: 1
-    pods: 2
+    pods: 20
     type: ambient # No sidecar needed
+    labels:
+      istio.io/global: "true"
   - name: med
     replicas: 1
-    pods: 1
+    pods: 10
     type: ambient # No sidecar needed
+    labels:
+      istio.io/global: "true"
   - name: small
     replicas: 1
-    pods: 1
+    pods: 10
     type: ambient # No sidecar needed
+    labels:
+      istio.io/global: "true"
 nodes:
 - name: node
-  count: 2
+  count: 15
   ztunnel: {}

@@ -84,6 +84,9 @@ rules:
   - apiGroups: [""]
     resources: ["serviceaccounts/token"]
     verbs: ["create"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "watch", "list", "create", "patch", "update", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
